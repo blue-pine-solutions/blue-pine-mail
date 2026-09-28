@@ -3,7 +3,8 @@ import { eq } from "drizzle-orm";
 import { getEnv } from "@/lib/cloudflare";
 import { getDb } from "@/db";
 import { users } from "@/db/schema";
-import { authenticateAdminApiKey, canManageAdminAccounts } from "@/lib/api/admin-auth";
+import { authenticateAdminApiKey } from "@/lib/api/admin-auth";
+import { FEATURE_DISABLED_MESSAGES, getFeaturePolicy } from "@/lib/distribution/features";
 import { updateManagedAccountSchema } from "@/lib/validators";
 import { getLicenseEntitlements } from "@/lib/licenses/service";
 import { selectAccountById, updateAccountCredentials } from "@/app/api/accounts/[id]/utils";
@@ -14,7 +15,7 @@ export async function GET(request: Request, { params }: AdminAccountRouteParams)
 	const env = getEnv();
 	const auth = await authenticateAdminApiKey(env, request, "accounts");
 	if (!auth) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-	if (!(await canManageAdminAccounts(env))) return NextResponse.json({ error: "A Team license is required to manage accounts" }, { status: 403 });
+	if (!getFeaturePolicy().multipleAccounts) return NextResponse.json({ error: FEATURE_DISABLED_MESSAGES.multipleAccounts }, { status: 403 });
 	const { id } = await params;
 	const account = await selectAccountById(getDb(env), id);
 	if (!account || (account.id !== auth.userId && account.createdByUserId !== auth.userId)) return NextResponse.json({ error: "Account not found" }, { status: 404 });
@@ -29,7 +30,7 @@ export async function PATCH(request: Request, { params }: AdminAccountRouteParam
 	const env = getEnv();
 	const auth = await authenticateAdminApiKey(env, request, "accounts");
 	if (!auth) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-	if (!(await canManageAdminAccounts(env))) return NextResponse.json({ error: "A Team license is required to manage accounts" }, { status: 403 });
+	if (!getFeaturePolicy().multipleAccounts) return NextResponse.json({ error: FEATURE_DISABLED_MESSAGES.multipleAccounts }, { status: 403 });
 	const { id } = await params;
 	const db = getDb(env);
 	const account = await selectAccountById(db, id);

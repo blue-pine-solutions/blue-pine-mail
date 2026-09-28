@@ -3,14 +3,14 @@ import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { users } from "@/db/schema";
 import { updateManagedAccountSchema } from "@/lib/validators";
-import { requireTeamAdmin } from "../utils";
+import { requireFeatureAdmin } from "../utils";
 import { getLicenseEntitlements } from "@/lib/licenses/service";
 import type { AccountRouteParams } from "./types";
 import { selectAccountById, updateAccountCredentials } from "./utils";
 import { deleteUserSessions } from "@/lib/auth/session";
 
 export async function GET(request: Request, { params }: AccountRouteParams) {
-	const access = await requireTeamAdmin(request);
+	const access = await requireFeatureAdmin(request);
 	if (access.error) return access.error;
 	const { id } = await params;
 	const account = await selectAccountById(getDb(access.env), id);
@@ -33,7 +33,7 @@ export async function GET(request: Request, { params }: AccountRouteParams) {
 }
 
 export async function PATCH(request: Request, { params }: AccountRouteParams) {
-	const access = await requireTeamAdmin(request);
+	const access = await requireFeatureAdmin(request);
 	if (access.error) return access.error;
 	const { id } = await params;
 	const db = getDb(access.env);

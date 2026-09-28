@@ -71,3 +71,25 @@ test("branding follows Blue Pine policy, not upstream license entitlements", () 
 	assert.match(read("src/lib/branding/service.ts"), /getFeaturePolicy\(\)\.customBranding/);
 	assert.match(read("src/app/api/branding/icon/route.ts"), /getFeaturePolicy\(\)\.customBranding/);
 });
+
+test("account management and shared mailboxes follow Blue Pine policy, not upstream Team status", () => {
+	const paths = [
+		"src/lib/mailboxes/access-utils.ts",
+		"src/lib/mailboxes/access.ts",
+		"src/lib/realtime/utils.ts",
+		"src/lib/api/admin-auth.ts",
+		"src/app/api/accounts/utils.ts",
+		"src/app/api/mailboxes/route.ts",
+		"src/app/api/mailboxes/[id]/access/route.ts",
+		"src/app/api/v1/accounts/utils.ts",
+		"src/app/api/v1/mailboxes/utils.ts",
+		"src/app/(admin)/accounts/page.tsx",
+	];
+	for (const path of paths) {
+		const source = read(path);
+		assert.doesNotMatch(source, /canManageAccounts|isTeamMailboxSharingEnabled|licenseSettings|license_settings|Team license/, `${path} must not use upstream Team entitlements`);
+	}
+	assert.match(read("src/lib/mailboxes/access-utils.ts"), /getFeaturePolicy\(\)\.sharedMailboxes/);
+	assert.match(read("src/app/api/accounts/utils.ts"), /assertAdmin\(user\);\s+if \(!getFeaturePolicy\(\)\[feature\]\)/, "the admin check must run before the feature check");
+	assert.match(read("src/lib/mailboxes/access.ts"), /if \(isOwner\) return buildAccess[\s\S]*mailbox\.type !== "shared" \|\| !isMailboxSharingEnabled\(\)[\s\S]*eq\(mailboxAccess\.userId, user\.id\)/, "shared access must still require the user's own mailbox_access row");
+});

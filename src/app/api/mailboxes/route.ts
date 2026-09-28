@@ -5,7 +5,7 @@ import { getDb } from "@/db";
 import { domains, mailboxAliases, mailboxes, users } from "@/db/schema";
 import { requireUser } from "@/lib/auth/cookies";
 import { newId } from "@/lib/ids";
-import { getLicenseEntitlements } from "@/lib/licenses/service";
+import { FEATURE_DISABLED_MESSAGES, getFeaturePolicy } from "@/lib/distribution/features";
 import { tracksAccountIdentity } from "@/lib/profile/identity-utils";
 import { mailboxSchema } from "@/lib/validators";
 import { ensureMailboxDomainRouting, getMailboxDomainAddresses } from "@/lib/mailboxes/domain-addresses";
@@ -16,7 +16,6 @@ export async function GET(request: Request) {
 	const user = await requireUser(env, request);
 	const db = getDb(env);
 	const rows = await ensurePersonalMailbox(env, db, user);
-	const entitlements = await getLicenseEntitlements(env);
 	return NextResponse.json({
 		mailboxes: await Promise.all(rows.map(async (mailbox) => ({
 			...mailbox,
@@ -25,7 +24,7 @@ export async function GET(request: Request) {
 				: {}),
 			senderAddresses: await getMailboxDomainAddresses(db, mailbox),
 		}))),
-		canCreateShared: user.role === "admin" && entitlements.canManageAccounts,
+		canCreateShared: user.role === "admin" && getFeaturePolicy().sharedMailboxes,
 	});
 }
 
@@ -40,9 +39,9 @@ export async function POST(request: Request) {
 	const db = getDb(env);
 	const mailboxType = parsed.data.type ?? "personal";
 	if (mailboxType === "shared") {
-		const entitlements = await getLicenseEntitlements(env);
-		if (user.role !== "admin" || !entitlements.canManageAccounts) {
-			return NextResponse.json({ error: "A Team license is required to create shared inboxes" }, { status: 403 });
+		if (user.role !== "admin") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+		if (!getFeaturePolicy().sharedMailboxes) {
+			return NextResponse.json({ error: FEATURE_DISABLED_MESSAGES.sharedMailboxes }, { status: 403 });
 		}
 	}
 	const ownerUserId = mailboxType === "shared" ? user.id : parsed.data.ownerUserId ?? user.id;

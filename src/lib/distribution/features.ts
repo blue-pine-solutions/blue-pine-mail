@@ -14,6 +14,15 @@ export const FEATURE_POLICY_KEYS: readonly FeaturePolicyKey[] = [
 	"gravatar",
 ];
 
+/** Neutral wording for a request refused because this deployment turned the feature off. */
+export const FEATURE_DISABLED_MESSAGES: Record<FeaturePolicyKey, string> = {
+	customBranding: "Custom branding is turned off for this deployment",
+	multipleAccounts: "Account management is turned off for this deployment",
+	sharedMailboxes: "Shared mailboxes are turned off for this deployment",
+	accountForwarding: "Email forwarding is turned off for this deployment",
+	gravatar: "Gravatar lookups are turned off for this deployment",
+};
+
 function processEnv(): DistributionEnv {
 	return typeof process === "undefined" ? {} : (process.env as DistributionEnv);
 }

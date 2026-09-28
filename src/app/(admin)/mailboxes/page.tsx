@@ -171,7 +171,7 @@ export default function MailboxesPage() {
 							</div>
 							) : (
 								<p className="rounded-2xl bg-blue-50 px-4 py-3 text-sm text-blue-800">
-									After creating the shared inbox, choose which Team accounts can access it.
+									After creating the shared inbox, choose which accounts can access it.
 								</p>
 							)}
 							<div className="space-y-2">

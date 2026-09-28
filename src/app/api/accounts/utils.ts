@@ -4,7 +4,7 @@ import type { getDb } from "@/db";
 import { domains, mailboxes, users } from "@/db/schema";
 import { assertAdmin } from "@/lib/auth/admin";
 import { requireUser } from "@/lib/auth/cookies";
-import { getLicenseEntitlements } from "@/lib/licenses/service";
+import { FEATURE_DISABLED_MESSAGES, getFeaturePolicy } from "@/lib/distribution/features";
 import { getEnv } from "@/lib/cloudflare";
 
 type Db = ReturnType<typeof getDb>;
@@ -68,16 +68,17 @@ export function accountListItemFromUser(user: {
 	};
 }
 
-export async function requireTeamAdmin(request: Request) {
+/** An authenticated admin, and the deployment offers the feature. The admin check always runs first. */
+export async function requireFeatureAdmin(request: Request, feature: "multipleAccounts" | "sharedMailboxes" = "multipleAccounts") {
 	const env = getEnv();
 	try {
 		const user = await requireUser(env, request);
 		assertAdmin(user);
-		if (!(await getLicenseEntitlements(env)).canManageAccounts) {
+		if (!getFeaturePolicy()[feature]) {
 			return {
 				env,
 				user,
-				error: NextResponse.json({ error: "A Team license is required to manage accounts" }, { status: 403 }),
+				error: NextResponse.json({ error: FEATURE_DISABLED_MESSAGES[feature] }, { status: 403 }),
 			};
 		}
 		return { env, user, error: null };

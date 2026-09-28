@@ -1,17 +1,11 @@
-import { eq } from "drizzle-orm";
-import type { AppDatabase } from "@/db";
-import { licenseSettings } from "@/db/schema";
+import { getFeaturePolicy } from "@/lib/distribution/features";
 
-export async function isTeamMailboxSharingEnabled(db: AppDatabase): Promise<boolean> {
-	try {
-		const [license] = await db
-			.select({ plan: licenseSettings.plan, state: licenseSettings.state })
-			.from(licenseSettings)
-			.where(eq(licenseSettings.id, "default"))
-			.limit(1);
-
-		return license?.plan === "team" && license.state === "active";
-	} catch {
-		return false;
-	}
+/**
+ * Whether this deployment offers shared mailboxes at all. This is feature
+ * availability only: access to a shared mailbox still requires that user's own
+ * mailbox_access row. Turning the feature off hides delegated access without
+ * deleting any sharing records.
+ */
+export function isMailboxSharingEnabled(): boolean {
+	return getFeaturePolicy().sharedMailboxes;
 }

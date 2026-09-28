@@ -2,12 +2,12 @@ import { eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { getDb } from "@/db";
 import { domains, mailboxes } from "@/db/schema";
-import { requireTeamAdmin } from "../../utils";
+import { requireFeatureAdmin } from "../../utils";
 import { selectAccountById } from "../utils";
 import type { AccountRouteParams } from "../types";
 
 export async function GET(request: Request, { params }: AccountRouteParams) {
-	const access = await requireTeamAdmin(request);
+	const access = await requireFeatureAdmin(request);
 	if (access.error) return access.error;
 	const { id } = await params;
 	const db = getDb(access.env);

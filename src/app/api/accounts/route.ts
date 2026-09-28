@@ -13,11 +13,11 @@ import {
 	getDomainForAdmin,
 	getExistingMailbox,
 	listAccountsForAdmin,
-	requireTeamAdmin,
+	requireFeatureAdmin,
 } from "./utils";
 
 export async function GET(request: Request) {
-	const access = await requireTeamAdmin(request);
+	const access = await requireFeatureAdmin(request);
 	if (access.error) return access.error;
 	const rows = await listAccountsForAdmin(getDb(access.env));
 	return NextResponse.json({
@@ -26,7 +26,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-	const access = await requireTeamAdmin(request);
+	const access = await requireFeatureAdmin(request);
 	if (access.error) return access.error;
 
 	const parsed = createUserAccountSchema.safeParse(await request.json());

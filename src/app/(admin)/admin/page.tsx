@@ -37,7 +37,7 @@ const sections = [
 	{
 		href: "/accounts",
 		title: "Accounts",
-		description: "Add and manage user accounts with a Team license.",
+		description: "Add and manage user accounts.",
 		icon: Users,
 	},
 	{

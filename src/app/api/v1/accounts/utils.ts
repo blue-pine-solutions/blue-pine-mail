@@ -3,7 +3,8 @@ import { eq, or } from "drizzle-orm";
 import { getEnv } from "@/lib/cloudflare";
 import { getDb } from "@/db";
 import { mailboxes, users } from "@/db/schema";
-import { authenticateAdminApiKey, canManageAdminAccounts } from "@/lib/api/admin-auth";
+import { authenticateAdminApiKey } from "@/lib/api/admin-auth";
+import { FEATURE_DISABLED_MESSAGES, getFeaturePolicy } from "@/lib/distribution/features";
 import { hashPassword } from "@/lib/auth/password";
 import { newId } from "@/lib/ids";
 import { createUserAccountSchema } from "@/lib/validators";
@@ -15,7 +16,7 @@ export async function GET(request: Request) {
 	const env = getEnv();
 	const auth = await authenticateAdminApiKey(env, request, "accounts");
 	if (!auth) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-	if (!(await canManageAdminAccounts(env))) return NextResponse.json({ error: "A Team license is required to manage accounts" }, { status: 403 });
+	if (!getFeaturePolicy().multipleAccounts) return NextResponse.json({ error: FEATURE_DISABLED_MESSAGES.multipleAccounts }, { status: 403 });
 	const rows = await getDb(env).select().from(users).where(or(eq(users.id, auth.userId), eq(users.createdByUserId, auth.userId)));
 	return NextResponse.json({ accounts: rows.map(accountListItemFromUser) });
 }
@@ -24,7 +25,7 @@ export async function POST(request: Request) {
 	const env = getEnv();
 	const auth = await authenticateAdminApiKey(env, request, "accounts");
 	if (!auth) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-	if (!(await canManageAdminAccounts(env))) return NextResponse.json({ error: "A Team license is required to manage accounts" }, { status: 403 });
+	if (!getFeaturePolicy().multipleAccounts) return NextResponse.json({ error: FEATURE_DISABLED_MESSAGES.multipleAccounts }, { status: 403 });
 	const parsed = createUserAccountSchema.safeParse(await request.json().catch(() => null));
 	if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
 	const db = getDb(env);

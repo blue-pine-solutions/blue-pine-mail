@@ -51,7 +51,7 @@ export default function AccountPermissionsPage() {
 						<tr>
 							<td className="px-5 py-4">
 								<p className="text-sm font-semibold text-neutral-900">Administrator access</p>
-								<p className="mt-1 text-xs text-neutral-500">Access administration pages and manage Team settings.</p>
+								<p className="mt-1 text-xs text-neutral-500">Access administration pages and manage settings.</p>
 							</td>
 							<td className="px-5 py-4 text-center">
 								<Checkbox
