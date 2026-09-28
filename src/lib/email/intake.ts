@@ -13,14 +13,20 @@ import type { IntakeActions, IntakeInput, IntakeResult } from "@/lib/email/intak
 export async function intakeIncomingMail(env: CloudflareEnv, input: IntakeInput, actions: IntakeActions): Promise<IntakeResult> {
 	const decision = await resolveIncomingMail(env, input.from, input.to);
 
-	if (decision?.action === "reject") {
+	if (!decision) {
+		const reason = "No mailbox or routing rule for recipient";
+		await actions.reject?.(reason);
+		return { action: "reject", reason };
+	}
+
+	if (decision.action === "reject") {
 		const reason = decision.rejectReason ?? "Message rejected by routing rule";
 		await actions.reject?.(reason);
 		return { action: "reject", reason };
 	}
 
 	let forwardedTo: string | null = null;
-	if (decision?.action === "forward" && decision.forwardTo) {
+	if (decision.action === "forward" && decision.forwardTo) {
 		const forwarded = await actions.forward?.(decision.forwardTo, { [MAILFLARE_FORWARDED_HEADER]: "1" });
 		if (forwarded) forwardedTo = decision.forwardTo;
 		if (forwarded && !decision.keepCopy) return { action: "forward", forwardedTo };
