@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -41,4 +41,15 @@ test("UPSTREAM.md records both repositories and the compatibility boundary", () 
 		assert.ok(upstream.includes(identifier), `UPSTREAM.md must list ${identifier} as compatibility-sensitive`);
 	}
 	assert.match(upstream, /verbatim and in order/, "UPSTREAM.md must require upstream migrations verbatim and in order");
+});
+
+test("the distribution layer exists and stays independent of upstream licensing", () => {
+	for (const path of ["src/lib/distribution/identity.ts", "src/lib/distribution/features.ts", "src/lib/distribution/types.d.ts"]) {
+		assert.ok(existsSync(join(root, path)), `${path} must exist`);
+	}
+	for (const name of readdirSync(join(root, "src/lib/distribution"))) {
+		const source = read(`src/lib/distribution/${name}`);
+		assert.doesNotMatch(source, /@\/lib\/licenses|lib\/licenses\//, `${name} must not import the upstream license module`);
+		assert.doesNotMatch(source, /paymug/i, `${name} must not reference Paymug`);
+	}
 });
