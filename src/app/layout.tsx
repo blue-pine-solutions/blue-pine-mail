@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Providers } from "@/components/providers";
 import { sidebarBootstrapScript } from "@/components/sidebar-state-utils";
+import { DEFAULT_APP_NAME } from "@/lib/branding/utils";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -15,7 +16,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-	title: "Mailflare",
+	title: DEFAULT_APP_NAME,
 	description: "Multi-tenant email on Cloudflare",
 	icons: { icon: "/api/branding/icon" },
 	robots: {

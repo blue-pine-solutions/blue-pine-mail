@@ -53,3 +53,21 @@ test("the distribution layer exists and stays independent of upstream licensing"
 		assert.doesNotMatch(source, /paymug/i, `${name} must not reference Paymug`);
 	}
 });
+
+test("branding follows Blue Pine policy, not upstream license entitlements", () => {
+	for (const path of [
+		"src/lib/branding/service.ts",
+		"src/lib/branding/utils.ts",
+		"src/app/api/branding/route.ts",
+		"src/app/api/branding/icon/route.ts",
+		"src/components/branding-provider.tsx",
+		"src/components/branding-provider-utils.ts",
+		"src/app/(admin)/branding/page.tsx",
+	]) {
+		const source = read(path);
+		assert.doesNotMatch(source, /@\/lib\/licenses|getLicenseEntitlements/, `${path} must not use upstream license entitlements`);
+		assert.doesNotMatch(source, /paymug|Pro or Team/i, `${path} must not carry upstream commercial wording`);
+	}
+	assert.match(read("src/lib/branding/service.ts"), /getFeaturePolicy\(\)\.customBranding/);
+	assert.match(read("src/app/api/branding/icon/route.ts"), /getFeaturePolicy\(\)\.customBranding/);
+});

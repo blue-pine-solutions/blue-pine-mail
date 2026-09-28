@@ -1,16 +1,23 @@
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { appSettings } from "@/db/schema";
+import { getFeaturePolicy } from "@/lib/distribution/features";
 import type { Branding } from "./types";
-import { getLicenseEntitlements } from "@/lib/licenses/service";
+import { DEFAULT_APP_NAME, resolveAppName } from "./utils";
 
+export { DEFAULT_APP_NAME } from "./utils";
 export const APP_SETTINGS_ID = "default";
-export const DEFAULT_APP_NAME = "Mailflare";
 export const BRANDING_ICON_KEY = "branding/app-icon";
 
+export class BrandingDisabledError extends Error {
+	constructor() {
+		super("Custom branding is turned off for this deployment");
+	}
+}
+
 export async function getBranding(env: CloudflareEnv): Promise<Branding> {
-	const entitlements = await getLicenseEntitlements(env);
-	if (!entitlements.canCustomizeBranding) {
+	// When the deployment turns custom branding off, stored branding is kept but not shown.
+	if (!getFeaturePolicy().customBranding) {
 		return { appName: DEFAULT_APP_NAME, hasCustomIcon: false, canCustomizeBranding: false };
 	}
 
@@ -21,7 +28,7 @@ export async function getBranding(env: CloudflareEnv): Promise<Branding> {
 			.where(eq(appSettings.id, APP_SETTINGS_ID))
 			.limit(1);
 		return {
-			appName: settings?.appName || DEFAULT_APP_NAME,
+			appName: resolveAppName(settings?.appName),
 			hasCustomIcon: !!settings?.iconKey,
 			canCustomizeBranding: true,
 		};
@@ -34,9 +41,7 @@ export async function updateBranding(
 	env: CloudflareEnv,
 	input: { appName: string; icon?: File | null },
 ): Promise<Branding> {
-	if (!(await getLicenseEntitlements(env)).canCustomizeBranding) {
-		throw new Error("A Pro or Team license is required to customize branding");
-	}
+	if (!getFeaturePolicy().customBranding) throw new BrandingDisabledError();
 	let iconKey: string | undefined;
 	if (input.icon) {
 		iconKey = BRANDING_ICON_KEY;
