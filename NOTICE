@@ -1,0 +1,46 @@
+Blue Pine Mail
+==============
+
+Blue Pine Mail is a modified, downstream version of Mailflare.
+
+Upstream project
+----------------
+Mailflare - Email for professionals and teams
+https://github.com/hieunc229/mailflare
+Copyright (C) 2026 Hieu Nguyen
+
+The upstream copyright and license notices are preserved. Contributions by
+other upstream contributors are recorded in the git history.
+
+Modifications
+-------------
+Modifications by Blue Pine Solutions, 2026-09-28.
+
+Downstream changes in this repository to date:
+
+- Manual (self-hosted) domain setup works without Cloudflare credentials.
+- MX setup for manually managed domains no longer attempts a Cloudflare
+  lookup.
+- The inbound SMTP listener rejects recipients that do not exist on this
+  installation instead of accepting them.
+
+The git history of https://github.com/bofa-ds/mailflare identifies each
+change individually.
+
+License
+-------
+The covered work, including these modifications, is licensed under the GNU
+Affero General Public License, version 3 or (at your option) any later
+version. LICENSE contains the authoritative license text.
+
+Corresponding Source
+--------------------
+The Corresponding Source for Blue Pine Mail is available at:
+https://github.com/bofa-ds/mailflare
+
+Affiliation
+-----------
+Blue Pine Mail is an independent downstream distribution. It is not
+affiliated with or endorsed by the upstream Mailflare project. "Mailflare"
+refers to the upstream project and is used here only to identify the origin
+of this work.

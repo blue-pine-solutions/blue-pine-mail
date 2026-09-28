@@ -131,6 +131,19 @@ The admin overview dispatches `deploy-update.yml` (constant in `src/app/api/admi
 - UI is Tailwind v4 + shadcn/Radix primitives in `src/components/ui/`. `DialogContent` sets no max height, so a tall dialog overflows the viewport with an unreachable submit button — add `max-h-[calc(100vh-4rem)] overflow-y-auto` on any dialog with more than a few fields.
 - `cloudflare-env.d.ts` is generated (500KB) — regenerate with `cf-typegen`, never hand-edit.
 
+## Blue Pine downstream distribution
+
+This repository is **Blue Pine Mail**, a downstream distribution derived from Mailflare (`upstream` = hieunc229/mailflare, `origin` = bofa-ds/mailflare). `NOTICE` records the attribution and the modifications made so far. **Read `UPSTREAM.md` before any architectural change**; it is the engine/product boundary and the upstream integration contract.
+
+- **Engine follows upstream, product layer is Blue Pine's.** Schema, migrations, mail pipeline, routing, SMTP, JMAP, API v1, MCP tools, relay protocol, auth and runtime contracts stay upstream-shaped. Identity, feature policy, commercial policy, branding policy, legal/source surfaces, the release channel and operations belong to Blue Pine.
+- **Never casually rename compatibility-sensitive `mailflare` identifiers** (headers, stored HTML markers, backup format id, storage keys, env vars, `mailflare.sqlite`, ICS UIDs). The full list is in `UPSTREAM.md`. The word "Mailflare" in code is not by itself a reason to change it.
+- **Upstream migrations are taken verbatim and in order.** Never edit, skip, reorder or renumber them. Do not add downstream migrations unless `UPSTREAM.md` is updated first.
+- **Product policy belongs to Blue Pine.** Today feature gates still run through upstream's `getLicenseEntitlements` (`src/lib/licenses/`). The planned replacement is a Blue Pine distribution policy (`src/lib/distribution/`, *not yet implemented*). Do not accept new upstream license/commercial gates without reviewing them against that plan.
+- **Prefer offering generic engine fixes upstream** so downstream divergence shrinks.
+- **`LICENSE` must remain untouched.**
+- **Git hygiene:** `docker-compose.yml` may hold operator-local changes. Never stage it without explicit instruction. Stage downstream work by explicit path (no `git add -A`, `git add .`, or `git commit -a`).
+- `tests/distribution-guard.test.mjs` checks the downstream invariants; keep it passing and extend it as later phases land.
+
 <!-- BEGIN:nextjs-agent-rules -->
 
 # This is NOT the Next.js you know
