@@ -1,6 +1,6 @@
-# Mailflare email relay
+# Blue Pine Mail email relay
 
-A small Cloudflare Worker for self-hosted Mailflare installs that want to keep
+A small Cloudflare Worker for self-hosted Blue Pine Mail installs that want to keep
 receiving mail through Cloudflare Email Routing (no port 25, no MX changes).
 
 1. `npm install`, then `npx wrangler secret put MAILFLARE_URL` (your server's

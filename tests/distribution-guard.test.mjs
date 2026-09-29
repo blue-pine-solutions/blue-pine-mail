@@ -111,3 +111,37 @@ test("forwarding follows Blue Pine policy and keeps the X-Mailflare-Forwarded lo
 	assert.match(read("src/lib/email/intake.ts"), /alreadyForwarded[\s\S]*MAILFLARE_FORWARDED_HEADER[\s\S]*if \(!alreadyForwarded\)/);
 	assert.match(read("worker.ts"), /message\.headers\.get\(MAILFLARE_FORWARDED_HEADER\) !== "1"/);
 });
+
+const DOCUMENTS = ["README.md", ...readdirSync(join(root, "docs")).filter((name) => name.endsWith(".md")).map((name) => `docs/${name}`), "deploy/cloudflare-email-relay/README.md"];
+
+test("the README presents Blue Pine Mail as a downstream of Mailflare under the AGPL", () => {
+	const readme = read("README.md");
+	assert.match(readme, /^# Blue Pine Mail\b/);
+	assert.match(readme, /Blue Pine Solutions/);
+	assert.ok(readme.includes(UPSTREAM_REPOSITORY), "README must link the upstream project");
+	assert.match(readme, /Hieu Nguyen/);
+	assert.match(readme, /not affiliated with or endorsed by the Mailflare project/);
+	assert.match(readme, /AGPL-3\.0-or-later/);
+	assert.doesNotMatch(readme, /^# Mailflare/m);
+});
+
+test("documentation no longer describes the removed licensing layer or upstream updater", () => {
+	for (const path of [...DOCUMENTS, "package.json", ".dev.vars.example", ".env.docker.example"]) {
+		const text = read(path);
+		assert.doesNotMatch(text, /paymug|Branding license|license key|(Team|Pro) license|GITHUB_UPDATE_|MAILFLARE_UPDATE_TOKEN|deploy-update|Update Mailflare|mailflare\.co\b/i, `${path} mentions removed licensing or update material`);
+	}
+	assert.ok(!existsSync(join(root, ".github/FUNDING.yml")), "upstream funding metadata is not republished by the downstream repository");
+	assert.ok(!existsSync(join(root, ".github/workflows/deploy-update.yml")));
+});
+
+test("relative links in the documentation point at files that exist", () => {
+	for (const path of DOCUMENTS) {
+		const text = read(path);
+		for (const [, target] of text.matchAll(/\]\(([^)\s]+)\)/g)) {
+			if (/^(https?:|mailto:|#)/.test(target)) continue;
+			const file = target.split("#")[0];
+			assert.ok(existsSync(join(root, dirname(path), file)), `${path} links to missing ${target}`);
+		}
+	}
+	assert.ok(existsSync(join(root, ".env.docker.example")), "the self-hosting guide copies .env.docker.example");
+});

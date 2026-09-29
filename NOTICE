@@ -32,7 +32,13 @@ Downstream changes in this repository to date:
 - Upstream's commercial licensing integration (Paymug license activation
   and the related pricing and upgrade screens) has been removed.
 - The product is identified as Blue Pine Mail, with an About page and a
-  source link in the application.
+  source link in the application, and user-facing text names Blue Pine
+  Mail or the administrator's configured app name.
+- Upstream's in-app updater, which replaced an installation with the
+  latest upstream code, has been removed. The application now only checks
+  for approved Blue Pine Mail releases and never installs them itself.
+- The documentation describes the Blue Pine Mail distribution; upstream
+  sponsorship, pricing and promotional material has been removed.
 
 The git history of https://github.com/bofa-ds/mailflare identifies each
 change individually.

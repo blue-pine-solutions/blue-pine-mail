@@ -1,132 +1,124 @@
 # Deployment and configuration
 
-This guide covers Cloudflare deployment, runtime configuration, database backups, and application updates.
+This guide covers deploying Blue Pine Mail to Cloudflare Workers, runtime configuration, database migrations and backups, versions and updates, and source provenance. For a Docker or Node deployment on your own server, see [self-hosting](self-hosting.md).
 
 ## Overview
 
-Set up Mailflare in three steps:
-
-1. **Deploy the app:** use the Deploy to Cloudflare button, set the app name to `mailflare`, and provide the required `CF_TOKEN`.
+1. **Deploy the Worker** to your Cloudflare account, with the Worker named `mailflare` and a runtime `CF_TOKEN`.
 2. **Complete setup:** open the deployed app and follow `/setup` to check the installation and create the first admin account.
-3. **Connect your domain:** add a domain managed by the same Cloudflare account. Mailflare configures email routing and, when available and selected, email sending before helping you create the first mailbox.
+3. **Connect your domain:** add a domain managed by the same Cloudflare account. Blue Pine Mail configures Email Routing and, when selected, Email Sending before helping you create the first mailbox.
 
-The Worker name must remain `mailflare`. Before starting, create the required `CF_TOKEN` with **Zone Read**, **DNS Edit**, **Email Routing Edit**, and **Email Routing Rules Write** permissions for every domain you plan to connect. DNS Edit lets the confirmed setup flow replace conflicting MX records. Add **Email Sending Edit** when Mailflare should send email; it is optional for receive-only domains.
+The Worker name must stay `mailflare`. It is a compatibility name: `CF_EMAIL_WORKER_NAME`, the Worker `name` and `services[].service` for `WORKER_SELF_REFERENCE` in `wrangler.jsonc` must all agree, and Email Routing rules target it.
 
-## Step 1: Deploy mailflare
+Before starting, create the `CF_TOKEN` described below.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/hieunc229/mailflare)
+## Step 1: Deploy the Worker
 
-1. Click **Deploy to Cloudflare** above and sign in to Cloudflare if prompted.
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/bofa-ds/mailflare)
+
+The button deploys this repository.
+
+1. Click **Deploy to Cloudflare** and sign in if prompted.
 2. Choose the Cloudflare account that owns the domain you want to use.
-3. Set the app name to exactly `mailflare`. Do not rename it.
+3. Set the app name to exactly `mailflare`.
 4. Add `CF_TOKEN` when Cloudflare asks for the app's runtime variables or secrets.
-5. Start the deployment and wait for Cloudflare to finish provisioning and deploying the Worker.
+5. Start the deployment and wait for Cloudflare to provision and deploy the Worker.
 
 ### Required configuration
 
-Mailflare requires this runtime value:
+- `CF_TOKEN`: a scoped Cloudflare API token with **Zone Read**, **DNS Edit**, **Email Routing Edit** and **Email Routing Rules Write** access for the domains you will connect. Add **Email Sending Edit** to send mail; it is optional for receive-only domains. DNS Edit lets the confirmed setup flow replace conflicting MX records.
 
-- `CF_TOKEN` — a scoped Cloudflare API token with **Zone Read**, **DNS Edit**, **Email Routing Edit**, and **Email Routing Rules Write** access for the domains you will connect. Add **Email Sending Edit** to enable outbound mail. This is separate from the token Cloudflare uses to deploy the app.
+The deploy flow's own token is not passed to the app at runtime, so create `CF_TOKEN` separately. Paste only the token secret, without `Bearer`, and not the token ID. The token must belong to the same account as the domains you connect.
 
-Paste only the token secret into `CF_TOKEN`. Do not include the word `Bearer` and do not use the token ID. The token must belong to the same Cloudflare account as the domains you connect.
+### Optional configuration
 
-## Step 2: Complete mailflare setup
+| Name | Purpose |
+| --- | --- |
+| `TURNSTILE_SECRET_KEY`, `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | Bot protection on login and first-run registration |
+| `BLUEPINE_DISABLED_FEATURES` | Comma-separated features to turn off for this deployment: `customBranding`, `multipleAccounts`, `sharedMailboxes`, `accountForwarding`, `gravatar`. All are on by default. |
+| `BLUEPINE_BUILD_COMMIT` | The Blue Pine commit this deployment was built from; see [Source and build provenance](#source-and-build-provenance) |
+| `BLUEPINE_RELEASE_REPOSITORY` | `owner/repository` to check for approved releases instead of the default Blue Pine repository |
+| `AI_MODEL` | Workers AI model for the email assistant |
+
+## Step 2: Complete setup
 
 1. Open the URL of the deployed `mailflare` Worker.
-2. Go to `/setup` if Mailflare does not take you there automatically.
-3. Let Mailflare check the required Cloudflare configuration and initialize the empty D1 database.
-4. Create the first admin account when prompted.
+2. Go to `/setup` if you are not taken there automatically.
+3. Let setup check the required Cloudflare configuration and initialize the empty D1 database.
+4. Create the first admin account.
 
-Setup applies the committed migrations through the Worker's D1 binding before creating the first admin account.
+Setup applies the committed migrations through the Worker's D1 binding before creating the admin account. Registration closes once an admin exists.
 
-## Step 3: Connect your primary domain and create an account
+## Step 3: Connect your primary domain
 
-1. Enter a domain that already uses Cloudflare DNS on the same account as `CF_TOKEN`.
-2. Continue while Mailflare enables Email Routing and configures the required routing and sending DNS.
+1. Enter a domain that uses Cloudflare DNS on the same account as `CF_TOKEN`.
+2. Continue while Email Routing and the routing and sending DNS are configured.
 3. Choose the address for your first mailbox and finish setup.
 4. Open the inbox and send a test message to the new address.
 
-To connect more domains later, open **Admin → Domains**, select **New domain**, and enter the hostname. Mailflare configures Email Routing and Email Sending automatically.
-
-Your inbox should be ready to send and receive emails
+To connect more domains later, open **Admin → Domains** and select **New domain**.
 
 ---
 
 ## Manual deployment
 
-Install dependencies, configure the Cloudflare bindings in `wrangler.jsonc`, and run:
+Install dependencies, configure the Cloudflare bindings in `wrangler.jsonc` (start from `wrangler.jsonc.example`), and run:
 
 ```bash
 npm install
-npm run deploy:local
+npm run deploy
 ```
 
-The local deploy command builds with vinext and uploads the complete Worker with Wrangler. The Cloudflare Vite plugin generates `dist/server/wrangler.json` and redirects Wrangler to that build. It does not modify D1. The complete Worker is required because `worker.ts` also handles inbound email, queues, scheduled backups, and the real-time Durable Object.
+This builds with vinext and uploads the complete Worker with Wrangler. The Cloudflare Vite plugin generates `dist/server/wrangler.json` and redirects Wrangler to that build. It does not modify D1. The complete Worker is required because `worker.ts` also handles inbound email, queues, scheduled backups and the real-time Durable Object.
 
-For manual recovery, pending migrations can still be applied with:
+To record the exact source of a deployment, set `BLUEPINE_BUILD_COMMIT` to the commit you deployed (for example as a Worker variable, from `git rev-parse HEAD`).
 
-```bash
-npm run db:migrate:remote
-```
+## Database migrations
 
-Remote migrations require the target account's `database_id` in your local `wrangler.jsonc`. Do not commit an account-specific database ID to a reusable repository.
-
-## Database backups
-
-Mailflare exports its D1 records as JSON and stores the backup files in the configured R2 bucket. A cron trigger in `wrangler.jsonc` runs daily at 02:00 UTC and applies the schedule selected under **Admin → Backups**. Manual backups run the same record export directly from the admin API.
-
-Deploy the complete Worker with `npm run deploy` whenever the cron trigger is added or changed.
-
-After upgrading an existing installation and confirming the cron trigger is active, the old Workflow can be removed with `npx wrangler workflows delete mailflare-database-backup`. Deleting it also removes its historical Workflow instances; backup files in R2 and rows in Mailflare's backup history are unaffected.
-
-## Email assistant and MCP
-
-The assistant uses the Workers AI `AI` binding and a separate `mailflare-agent` queue. Provision the queue in the Cloudflare account before deploying a configuration that declares it, and apply migration `0032_add_agentic_mail.sql` before opening the new UI on an existing database. The five-minute cron recovers pending auto-draft work; the 02:00 UTC cron still runs backups.
-
-In the inbox, open **Assistant → Settings** for a mailbox, select its reviewer, and enable the assistant. Auto-drafting is a separate opt-in. It skips spam, automated mail, and mailboxes with out-of-office replies enabled. Generated replies appear as ordinary drafts assigned to the reviewer. The reviewer must open the draft and confirm the exact content before delivery.
-
-The assistant panel no longer exposes MCP key management. External MCP clients can still connect to `https://<your-mailflare-origin>/mcp` with a mailbox-scoped Bearer key created through the authenticated `/api/agent/mcp-keys` endpoint. Keys can be listed and revoked through that endpoint; a new key is shown only once. The server uses Streamable HTTP and accepts clients that can set a Bearer header. Its `request_send` tool returns a Mailflare review URL; the MCP key cannot confirm or deliver messages directly. MCP does not require Workers AI for read and draft tools.
-
-## Updating Mailflare
-
-The **Update Mailflare** button in the admin dashboard dispatches `.github/workflows/deploy-update.yml` in the installation repository. The workflow replaces the installation branch's complete tracked tree with the latest upstream source, commits that replacement, and pushes it. This avoids merge conflicts between independently created installation and upstream histories. Target-only committed files and code changes are intentionally removed; repository variables, secrets, and other GitHub or Cloudflare configuration remain unchanged. A connected Cloudflare Git integration then builds and deploys the change.
-
-### Auto update
-
-Create a fine-grained personal access token for the installation repository with these repository permissions:
-
-| Permission | Access | Used for |
-| --- | --- | --- |
-| Actions | Read and write | Dispatching `deploy-update.yml` from the Mailflare admin dashboard |
-| Contents | Read and write | Committing and pushing the upstream source into the installation repository |
-| Workflows | Read and write | Replacing files inside `.github/workflows` during an update |
-
-Configure the token and repository details in both Cloudflare and GitHub:
-
-| Location | Name | Type | Value |
-| --- | --- | --- | --- |
-| Cloudflare Worker | `GITHUB_UPDATE_TOKEN` | Secret | The fine-grained personal access token |
-| Cloudflare Worker | `GITHUB_UPDATE_REPO` | Variable | The installation repository in `owner/repository` format |
-| Cloudflare Worker | `GITHUB_UPDATE_REF` | Optional variable | The installation branch to update; omit it to use the repository's default branch |
-| GitHub repository → Actions | `MAILFLARE_UPDATE_TOKEN` | Repository secret | The same fine-grained personal access token |
-| GitHub repository → Actions | `UPDATE_SOURCE_REPOSITORY` | Optional repository variable | The upstream repository; defaults to `hieunc229/mailflare` |
-
-The same token can be used for `GITHUB_UPDATE_TOKEN` and `MAILFLARE_UPDATE_TOKEN` when it has all three permissions above. Keep both values secret and limit the token's repository access to the installation repository.
-
-Make sure `.github/workflows/deploy-update.yml` exists on the installation branch. If it is missing, create the file and copy its contents from the [canonical Mailflare update workflow](https://github.com/hieunc229/mailflare/blob/main/.github/workflows/deploy-update.yml). If an older installation has a different updater, replace it with the latest canonical workflow once. A running workflow cannot create or replace itself until the current workflow has been installed manually.
-
-After the GitHub Action completes successfully, wait for the connected Cloudflare deployment to finish before refreshing Mailflare or applying pending database migrations. The workflow updates the repository first; the new application version is not live until Cloudflare completes its deployment.
-
-Deployment and database migration are separate. After Cloudflare deploys a repository push or an admin-triggered update, open or refresh **Admin settings**. The application update card shows any pending database migrations. Select **Update database** to apply them through the Worker's D1 binding. The same runner initializes a new database during setup.
+Deployment and database migration are separate. After a new build is deployed, open **Admin → Version and updates**. It shows whether the database matches this build; select **Update database** to apply pending migrations through the Worker's D1 binding. The same runner initializes a new database during setup.
 
 If the Cloudflare dashboard has a custom deploy command containing `wrangler d1 migrations apply DB --remote`, remove that part and use `npm run deploy`.
 
-Each migration and its `d1_migrations` history entry run in one D1 batch. If a migration fails, its changes are rolled back, the failed filename is shown, and it can be retried after the problem is corrected. Wrangler remains available as a manual recovery tool.
+For manual recovery, pending migrations can be applied with `npm run db:migrate:remote`. It needs the target account's `database_id` in your local `wrangler.jsonc`; do not commit an account-specific database ID.
 
-New application releases must remain compatible with the previous schema until an administrator applies their migrations. Prefer additive changes, keep old columns during the transition, and avoid making authentication or the admin settings page depend immediately on a newly added column. Plan a maintenance window for an incompatible schema change.
+Each migration and its `d1_migrations` history entry run in one D1 batch. If a migration fails, its changes are rolled back, the failed filename is shown, and it can be retried after the problem is corrected.
 
-When adding a schema change, create a new uniquely named SQL file in `drizzle/migrations` and do not edit an applied migration. Build and development commands generate the Worker migration bundle from those files. `npm run db:bundle` can generate it explicitly.
+New builds must stay compatible with the previous schema until an administrator applies their migrations: prefer additive changes, keep old columns during the transition, and avoid making authentication or the admin pages depend immediately on a new column. Migrations follow upstream Mailflare's history exactly; see [UPSTREAM.md](../UPSTREAM.md) before adding one.
 
-## Branding license
+## Database backups
 
-Activate a purchased Pro or Team key from **Admin → Licenses**. Mailflare sends the key to Paymug and stores only a one-way hash and the activation state. Apply all D1 migrations before activating a license.
+Backups export the D1 records as JSON into the configured R2 bucket. A cron trigger in `wrangler.jsonc` runs daily at 02:00 UTC and applies the schedule chosen under **Admin → Backups**. Manual backups run the same export from the admin API. The backup format is shared with upstream Mailflare, so backups restore in either direction.
+
+Backups contain database records only; raw messages and attachments stay in R2. Keep your own copy of the R2 bucket if you need full disaster recovery. Deploy the complete Worker with `npm run deploy` whenever the cron trigger changes.
+
+Installations that predate the cron-based backups can remove the old Workflow with `npx wrangler workflows delete mailflare-database-backup` once the cron trigger is active. This deletes its historical Workflow instances; backup files in R2 and the backup history are unaffected.
+
+## Email assistant and MCP
+
+The assistant uses the Workers AI `AI` binding and a separate `mailflare-agent` queue. Provision the queue before deploying a configuration that declares it. The five-minute cron recovers pending auto-draft work; the 02:00 UTC cron runs backups. See [Email assistant and MCP](email-assistant-and-mcp.md) for configuration.
+
+## Versions and updates
+
+Three things identify what is running, and **Admin → Version and updates** and the **About** page show them:
+
+- **Blue Pine Mail version**: the distribution's own version.
+- **Mailflare base**: the upstream version this build is based on. It is not a Blue Pine version and is never offered as an update.
+- **Build commit**: the exact Blue Pine commit, when the deployment records `BLUEPINE_BUILD_COMMIT`.
+
+New versions reach installations this way:
+
+1. Blue Pine integrates upstream Mailflare changes on a separate branch, then reviews and tests them.
+2. A tested commit is published as a GitHub Release tagged `bluepine-vMAJOR.MINOR.PATCH` in the Blue Pine repository. Drafts and prereleases are not considered.
+3. Each installation's **Version and updates** card reports when such a release is newer than the installed version. It only checks; it never installs.
+4. You deploy the release with the method your installation uses (for example `npm run deploy` from the release tag), then apply any pending migrations.
+
+If GitHub cannot be reached, the release source is private or no releases exist, the card says so and everything else keeps working. Set `BLUEPINE_RELEASE_REPOSITORY` to check a different `owner/repository`. Installations never update themselves from upstream Mailflare.
+
+## Source and build provenance
+
+Blue Pine Mail is licensed under the GNU Affero General Public License v3.0 or later. The app offers its source to everyone who uses it:
+
+- `/about` shows the product, distributor, version, Mailflare base, build commit, license and the upstream attribution.
+- `/source` redirects to the source of the running build: `https://github.com/bofa-ds/mailflare/tree/<commit>` when `BLUEPINE_BUILD_COMMIT` holds a valid commit SHA, otherwise the repository itself.
+
+Every page links to **Source** and **About** in the sidebar footer and on the sign-in screens. Set `BLUEPINE_BUILD_COMMIT` on production deployments so the source link points at exactly what is running. It is not needed for development.

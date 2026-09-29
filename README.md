@@ -1,73 +1,42 @@
-<img src="/public/icon-96.png" alt="Mailflare" width="72" />
+# Blue Pine Mail
 
-# Mailflare
+Blue Pine Mail is a self-hosted email inbox for custom domains, distributed by Blue Pine Solutions.
 
-Mailflare is a self-hosted email inbox for custom domains, built on Cloudflare.
-
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/hieunc229/mailflare)
-
-## Screenshots
-
-| ![Inbox](/screenshots/1.png)<br>Inbox | ![Manage domains](/screenshots/2.png)<br>Manage domains | ![Manage inboxes](/screenshots/3.png)<br>Manage inboxes |
-| --- | --- | --- |
-
-### Featured sponsors
-
-<a target="_blank" href="https://sequenzy.com/?ref=hieunc229/mailflare">
-  <img height="80" src="/sponsors/sequenzy.png" alt="Sequenzy">
-</a>  <a target="_blank" href="https://drivemug.com/?ref=hieunc229/mailflare">
-  <img height="80" src="https://mailflare.co/sponsors/drivemug.png" alt="Drivemug">
-</a>
-
-Want to support the mailflare? <a target="_blank" href="https://store.paymug.co/buy/mailflare-sponsor">Start sponsoring</a>
+It is an independent downstream distribution of [Mailflare](https://github.com/hieunc229/mailflare) by Hieu Nguyen. Blue Pine Mail is not affiliated with or endorsed by the Mailflare project or its author. See [NOTICE](NOTICE) for attribution and the list of downstream changes.
 
 ## What you can do
 
-- **Domain setup**: Connect domains and set up Cloudflare Email Routing from the dashboard.
-- **Mailboxes**: Create personal and shared mailboxes with delegated access.
-- **Email**: Send and receive email with attachments, rich formatting, signatures, and automatic replies.
-- **Inbox organization**: Organize mail with search, custom folders, stars, snoozing, archive, spam, and trash.
-- **Routing rules**: Create routing rules to store, forward, reject, or categorize incoming messages.
-- **Notifications**: Get real-time inbox updates and new-message notifications.
-- **Mail and contacts**: Import and export mail, manage contacts, and block unwanted senders.
-- **Administration**: Manage accounts, permissions, API keys, webhooks, audit logs, and database backups.
-- **Email AI Assistant**: Use an AI assistant to search mail, work with threads, and prepare drafts for a selected mailbox.
-- **MCP access**: Connect external AI clients through MCP with mailbox or admin permissions chosen for each key.
+- **Domains**: connect domains. On Cloudflare, Email Routing and sending DNS are configured for you; without Cloudflare credentials the DNS page lists the records to create by hand.
+- **Mailboxes and accounts**: create personal and shared mailboxes, add user accounts, and delegate mailbox access.
+- **Email**: send and receive email with attachments, rich formatting, signatures, automatic replies and account forwarding.
+- **Organization**: search, custom folders, stars, snoozing, archive, spam and trash.
+- **Routing rules**: store, forward, reject or categorize incoming messages.
+- **Notifications**: real-time inbox updates and browser notifications.
+- **Import and export**: import and export mail, manage contacts, block senders.
+- **Administration**: accounts, permissions, API keys, webhooks, audit logs, database backups and branding (app name and icon).
+- **Integrations**: an HTTP API, JMAP, an optional email assistant and an MCP endpoint for external AI clients.
 
-## How it works
+Optional features (custom branding, multiple accounts, shared mailboxes, account forwarding) are on by default and can be turned off per deployment with `BLUEPINE_DISABLED_FEATURES`.
 
-Mailflare runs in your Cloudflare account. Email Routing delivers incoming messages to the app, while Cloudflare's email service handles outgoing messages. Your mail data stays in your own D1 database and attachments are stored in your own R2 bucket.
+## Deployment
 
-## How much does it cost?
+Cloudflare Workers is the primary deployment target: mail data stays in your own D1 database, attachments in your own R2 bucket, and Cloudflare Email Routing delivers incoming mail to the Worker. See the [deployment guide](docs/deployment.md).
 
-You can setup Mailflare and receive email for free
+A Node/Docker build is also supported for self-hosting on your own server, with SQLite and local files instead of D1 and R2 and a built-in SMTP listener for inbound mail. See [self-hosting](docs/self-hosting.md).
 
-A [Paid Worker](https://developers.cloudflare.com/workers/platform/pricing/) plan ($5/month) is required to send email (and it's recommend to have a smooth experience)
+Cloudflare charges depend on your plan and usage; check Cloudflare's current pricing for Workers, D1, R2, Queues and Email Sending before deploying.
 
-## Deploy
+## Versions, updates and source
 
-Getting started takes three steps:
+- **Blue Pine Mail version** is the distribution's own version. The **Mailflare base** it was built from is shown separately. Both appear under **Admin → Version and updates** and on the **About** page.
+- **Updates** come only from approved Blue Pine Mail releases: published GitHub Releases tagged `bluepine-vMAJOR.MINOR.PATCH`. The app checks for them but never installs anything; you deploy a release with the method your installation uses.
+- **Source**: every page links to **Source** and **About**. `/source` leads to the source of the running build: the exact commit when the build records `BLUEPINE_BUILD_COMMIT`, otherwise this repository.
 
-1. **Deploy the app.** Click **Deploy to Cloudflare** and keep the app name as `mailflare`. The app will not work correctly under another Worker name.
-2. **Complete setup.** Open the deployed app and follow `/setup` to check the installation and create your admin account.
-3. **Connect your domain.** Add a domain managed by the same Cloudflare account. Mailflare configures its email routing and helps you create the first mailbox.
+## Current limitations
 
-⚠️ IMPORTANT: **`CF_TOKEN` is required during deployment**. Create a scoped [Cloudflare API token with the following permissions](https://github.com/hieunc229/mailflare/issues/24#issuecomment-5523686105) for the domains you want to connect.
-- All accounts - Email Sending:Edit, DNS Settings:Edit, Email Routing Addresses:Edit
-- All zones - DNS Settings:Edit, Email Routing Rules:Edit, Zone Settings:Edit, DNS:Edit
-
-See the [deployment guide](docs/deployment.md) for required permissions, manual deployment, backups, and updates.
-
-### Self-host with Docker instead
-
-Mailflare also runs as one container on any server, with SQLite and local files in place of D1 and R2, a built-in SMTP listener for inbound mail (or a small Cloudflare relay Worker if you want to keep MX on Cloudflare), and any SMTP relay or Cloudflare Email Sending for outbound.
-
-```bash
-cp .env.docker.example .env.docker
-docker compose up -d --build
-```
-
-See [docs/self-hosting.md](docs/self-hosting.md).
+- There is no IMAP server or SMTP submission service for desktop and phone mail clients. Use the web app, JMAP clients or the API.
+- The Docker build keeps its database and files on one local volume. The built-in backups are record exports stored on that same volume, so they are not an off-host disaster-recovery copy.
+- One host can bind public port 25 only once. Running several Docker installations on one server needs an inbound mail front end (or the Cloudflare relay Worker) to route mail to each.
 
 ## Local development
 
@@ -78,19 +47,25 @@ npm run db:migrate:local
 npm run dev
 ```
 
-Add your Cloudflare credentials to `.dev.vars`, then open [http://localhost:3000](http://localhost:3000). For sample local data, run `npm run db:seed` while the development server is running.
+Add your Cloudflare credentials to `.dev.vars`, then open [http://localhost:3000](http://localhost:3000). For sample data, run `npm run db:seed` while the development server is running.
 
-The Cloudflare app uses vinext and the Cloudflare Vite plugin, including local D1, R2, Queues, and Durable Objects. Remote bindings are disabled by default. To use Workers AI locally, authenticate with Wrangler, select your account with `CLOUDFLARE_ACCOUNT_ID`, and run `CLOUDFLARE_REMOTE_BINDINGS=true npm run dev`.
+Tests are `node:test` files: `node --test tests/*.test.mjs`. `npm run build` builds the complete Worker; `npm run build:node` builds the Node/Docker server.
 
-`npm run build` builds the complete Worker; `npm run start` previews that build locally. `npm run deploy` builds and deploys it. The separate Node/Docker runtime still uses Next.js and the existing `build:node`, `start:node`, and `dev:node` commands.
+Some internal names keep their upstream form for compatibility (for example the `mailflare` Worker name, `MAILFLARE_RUNTIME` and the `X-Mailflare-Forwarded` header). See [UPSTREAM.md](UPSTREAM.md) before renaming anything.
+
+## Upstream integration
+
+This repository follows Mailflare as an engineering input, not as an update source for installations. Upstream changes are merged on an integration branch, reviewed and tested, then shipped as a Blue Pine Mail release. [UPSTREAM.md](UPSTREAM.md) describes the process and the boundary between upstream engine code and Blue Pine's product layer. Generic fixes are offered back to Mailflare where they fit.
 
 ## Documentation
 
 - [Deployment and configuration](docs/deployment.md)
+- [Self-hosting with Docker](docs/self-hosting.md)
 - [API and integrations](docs/api.md)
 - [Email assistant and MCP](docs/email-assistant-and-mcp.md)
+- [Spam protection](docs/spam-protection.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
 ## License
 
-See [LICENSE](LICENSE).
+Blue Pine Mail is free software under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). See [LICENSE](LICENSE) and [NOTICE](NOTICE). If you run a modified version for others over a network, the AGPL requires you to offer them its source.
