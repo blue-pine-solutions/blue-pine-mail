@@ -58,7 +58,8 @@ export function startSmtpListener(
 							reject: (reason) => {
 								rejectReason = reason;
 							},
-							forward: async (destination) => mailer.sendRaw(from, destination, raw),
+							// Carry the headers intake asks for (the X-Mailflare-Forwarded loop guard), as the Worker and relay forwarders do.
+							forward: async (destination, extra) => mailer.sendRaw(from, destination, withAddedHeaders(raw, extra)),
 						},
 					).catch((error) => {
 						console.error(`SMTP intake failed for ${recipient.address}`, error);
@@ -97,6 +98,43 @@ export function parseHeaders(raw: Buffer): Record<string, string> {
 		if (!(name in headers)) headers[name] = line.slice(index + 1).trim();
 	}
 	return headers;
+}
+
+/**
+ * The raw message with `headers` added at the top of the header block. An existing
+ * field of the same name (with any folded lines) is dropped first so each added
+ * header appears once; every other byte, the body included, is kept as it was.
+ */
+export function withAddedHeaders(raw: Buffer, headers: Record<string, string>): Buffer {
+	const entries = Object.entries(headers);
+	if (entries.length === 0) return raw;
+	for (const [name, value] of entries) {
+		if (!/^[!-9;-~]+$/.test(name) || /[\r\n]/.test(value)) throw new Error(`Invalid header: ${name}`);
+	}
+	// latin1 maps every byte to one character, so decoding and re-encoding is lossless.
+	// (The project's Buffer typings omit the encoding argument; mailer.ts works around it the same way.)
+	const text = (raw as unknown as { toString(encoding: string): string }).toString("latin1");
+	const firstBreak = text.indexOf("\n");
+	const newline = firstBreak > 0 && text[firstBreak - 1] === "\r" ? "\r\n" : firstBreak >= 0 ? "\n" : "\r\n";
+	const separator = text.search(/\r?\n\r?\n/);
+	let block = separator >= 0 ? text.slice(0, separator) : text;
+	let rest = separator >= 0 ? text.slice(separator) : "";
+	const trailingBreak = block.match(/\r?\n$/)?.[0] ?? "";
+	block = block.slice(0, block.length - trailingBreak.length);
+	rest = trailingBreak + rest;
+
+	const names = new Set(entries.map(([name]) => name.toLowerCase()));
+	const fields: string[] = [];
+	for (const line of block.match(/[^\n]*\n|[^\n]+$/g) ?? []) {
+		if (/^[ \t]/.test(line) && fields.length > 0) fields[fields.length - 1] += line;
+		else fields.push(line);
+	}
+	const kept = fields
+		.filter((field) => !names.has(field.slice(0, Math.max(field.indexOf(":"), 0)).trim().toLowerCase()))
+		.join("")
+		.replace(/\r?\n$/, "");
+	const added = entries.map(([name, value]) => `${name}: ${value}`).join(newline);
+	return Buffer.from(added + (kept ? newline + kept : "") + rest, "latin1");
 }
 
 function toArrayBuffer(buffer: Buffer): ArrayBuffer {
