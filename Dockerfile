@@ -32,6 +32,10 @@ COPY --chown=node:node --from=build /app/public ./public
 COPY --chown=node:node --from=build /app/drizzle ./drizzle
 COPY --chown=node:node --from=build /app/package.json /app/next.config.ts ./
 COPY --chown=node:node --from=build /app/src/lib/security/headers.ts ./src/lib/security/headers.ts
+# The Blue Pine commit this image was built from, for the in-app source link:
+# docker build --build-arg BLUEPINE_BUILD_COMMIT=$(git rev-parse HEAD). Leave empty to link the repository.
+ARG BLUEPINE_BUILD_COMMIT=""
+ENV BLUEPINE_BUILD_COMMIT=$BLUEPINE_BUILD_COMMIT
 RUN mkdir -p /data && chown node:node /data
 USER node
 VOLUME ["/data"]

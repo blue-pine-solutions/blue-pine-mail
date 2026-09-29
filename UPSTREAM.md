@@ -51,6 +51,14 @@ Changes here are Blue Pine decisions. Upstream changes in these areas are transl
 
 Optional features (custom branding, multiple accounts, shared mailboxes, account forwarding) are gated by the Blue Pine feature policy in `src/lib/distribution/features.ts`. Upstream's Paymug licensing layer (`src/lib/licenses/`, `/api/licenses`, the Licenses page and Upgrade pill) is removed. The `license_settings` table is kept, unused, for schema and backup compatibility.
 
+## Distribution identity and source offer
+
+- `src/lib/distribution/identity.ts` is the single source of the product name (Blue Pine Mail), distributor (Blue Pine Solutions), Blue Pine version, upstream attribution (Mailflare by Hieu Nguyen, upstream version from `package.json`) and license (AGPL-3.0-or-later).
+- `/about` shows that identity; `/source` redirects to the Corresponding Source. The sidebar footer and the sign-in/setup screens link to both. Keep these reachable: they are the AGPL source offer for network users.
+- `BLUEPINE_BUILD_COMMIT` (a Docker build argument or runtime variable) makes `/source` point at the exact commit. Without it, the link falls back to the repository.
+- Admin-editable branding (`app_settings`) changes the app name users see, not the distribution identity on the About page or in `NOTICE`.
+- Keep upstream attribution in `NOTICE` and `LICENSE`; do not state or imply that Mailflare or its author endorses Blue Pine Mail.
+
 ## Never rename (compatibility)
 
 These identifiers contain "mailflare" but carry data, protocol or deployment compatibility. Do not rename them for cosmetic reasons.

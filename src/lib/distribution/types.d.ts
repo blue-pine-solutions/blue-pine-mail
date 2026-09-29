@@ -4,6 +4,8 @@ export type DistributionIdentity = {
 	version: string;
 	sourceRepository: string;
 	license: string;
+	licenseName: string;
+	licenseUrl: string;
 	upstream: {
 		name: string;
 		repository: string;

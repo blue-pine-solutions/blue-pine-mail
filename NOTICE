@@ -1,7 +1,8 @@
 Blue Pine Mail
 ==============
 
-Blue Pine Mail is a modified, downstream version of Mailflare.
+Blue Pine Mail is a modified, downstream version of Mailflare. It is
+distributed by Blue Pine Solutions.
 
 Upstream project
 ----------------
@@ -23,6 +24,15 @@ Downstream changes in this repository to date:
   lookup.
 - The inbound SMTP listener rejects recipients that do not exist on this
   installation instead of accepting them.
+- Forwarding on the self-hosted (Node) runtime now adds the
+  X-Mailflare-Forwarded loop-protection header, as the other runtimes do.
+- Custom branding, multiple accounts, shared mailboxes and account
+  forwarding are governed by a Blue Pine feature policy instead of
+  upstream's commercial license tiers.
+- Upstream's commercial licensing integration (Paymug license activation
+  and the related pricing and upgrade screens) has been removed.
+- The product is identified as Blue Pine Mail, with an About page and a
+  source link in the application.
 
 The git history of https://github.com/bofa-ds/mailflare identifies each
 change individually.
@@ -31,16 +41,22 @@ License
 -------
 The covered work, including these modifications, is licensed under the GNU
 Affero General Public License, version 3 or (at your option) any later
-version. LICENSE contains the authoritative license text.
+version. LICENSE contains the authoritative license text. The software is
+provided without warranty, as described in LICENSE.
 
 Corresponding Source
 --------------------
 The Corresponding Source for Blue Pine Mail is available at:
 https://github.com/bofa-ds/mailflare
 
+A running installation offers its source from the "Source" link in the
+application (the /source address). When the build records its commit
+(BLUEPINE_BUILD_COMMIT), that link points to the exact commit of the
+running build; otherwise it points to the repository above.
+
 Affiliation
 -----------
 Blue Pine Mail is an independent downstream distribution. It is not
-affiliated with or endorsed by the upstream Mailflare project. "Mailflare"
-refers to the upstream project and is used here only to identify the origin
-of this work.
+affiliated with or endorsed by the upstream Mailflare project or its
+author. "Mailflare" refers to the upstream project and is used here only
+to identify the origin of this work.

@@ -2,6 +2,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { domains, mailboxes, users } from "@/db/schema";
 import { formatEmailAddress } from "@/lib/email/address";
+import { DISTRIBUTION } from "@/lib/distribution/identity";
 import type { SystemMailInput } from "@/lib/email/system-mail-types";
 
 /**
@@ -48,5 +49,5 @@ export async function pickSystemSender(env: CloudflareEnv): Promise<{ address: s
 		.limit(50);
 	const chosen = rows.find((row) => row.role === "admin") ?? rows[0];
 	if (!chosen) return null;
-	return { address: `${chosen.localPart}@${chosen.hostname}`, name: chosen.displayName ?? "Mailflare" };
+	return { address: `${chosen.localPart}@${chosen.hostname}`, name: chosen.displayName ?? DISTRIBUTION.name };
 }

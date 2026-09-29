@@ -140,6 +140,7 @@ This repository is **Blue Pine Mail**, a downstream distribution derived from Ma
 - **Upstream migrations are taken verbatim and in order.** Never edit, skip, reorder or renumber them. Do not add downstream migrations unless `UPSTREAM.md` is updated first.
 - **Product policy belongs to Blue Pine.** Optional features are gated by the Blue Pine distribution policy in `src/lib/distribution/`; upstream's licensing layer has been removed. Upstream changes that add license or commercial gates must be translated to feature policy, not merged as-is.
 - **Prefer offering generic engine fixes upstream** so downstream divergence shrinks.
+- **Identity and source offer:** product, distributor, version and upstream attribution come from `src/lib/distribution/identity.ts`; `/about` and `/source` (the AGPL source offer) must stay reachable from the footer and auth screens. See `UPSTREAM.md`.
 - **`LICENSE` must remain untouched.**
 - **Git hygiene:** `docker-compose.yml` may hold operator-local changes. Never stage it without explicit instruction. Stage downstream work by explicit path (no `git add -A`, `git add .`, or `git commit -a`).
 - `tests/distribution-guard.test.mjs` checks the downstream invariants; keep it passing and extend it as later phases land.

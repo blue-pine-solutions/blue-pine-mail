@@ -17,6 +17,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
 	title: DEFAULT_APP_NAME,
+	applicationName: DEFAULT_APP_NAME,
 	description: "Multi-tenant email on Cloudflare",
 	icons: { icon: "/api/branding/icon" },
 	robots: {

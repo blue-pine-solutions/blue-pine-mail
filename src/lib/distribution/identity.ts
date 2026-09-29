@@ -11,6 +11,8 @@ export const DISTRIBUTION: DistributionIdentity = {
 	version: "0.1.0",
 	sourceRepository: "https://github.com/bofa-ds/mailflare",
 	license: "AGPL-3.0-or-later",
+	licenseName: "GNU Affero General Public License v3.0 or later",
+	licenseUrl: "https://www.gnu.org/licenses/agpl-3.0.html",
 	upstream: {
 		name: "Mailflare",
 		repository: "https://github.com/hieunc229/mailflare",
@@ -31,6 +33,10 @@ export function getBuildCommit(env: DistributionEnv = processEnv()): string | nu
 	const commit = env.BLUEPINE_BUILD_COMMIT?.trim() ?? "";
 	return COMMIT_PATTERN.test(commit) ? commit.toLowerCase() : null;
 }
+
+/** In-app routes for the source offer (redirects to getSourceUrl()) and the About page. */
+export const SOURCE_PATH = "/source";
+export const ABOUT_PATH = "/about";
 
 /** Where network users can get the Corresponding Source: the exact commit when known, otherwise the repository. */
 export function getSourceUrl(commit: string | null = getBuildCommit()): string {

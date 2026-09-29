@@ -1,6 +1,6 @@
 "use client";
 
-import packageJson from "../../package.json";
+import { SourceNotice } from "./distribution/source-notice";
 import { useSidebar } from "./sidebar-state";
 import { useShortcuts } from "./shortcuts";
 import { Keyboard } from "lucide-react";
@@ -8,7 +8,7 @@ import { Keyboard } from "lucide-react";
 export function SidebarFooter() {
 	const { minimal } = useSidebar();
 	const { openHelpModal, shortcutsEnabled, shortcutsPreferenceLoading } = useShortcuts();
-	if (minimal) return null;
+	if (minimal) return <SourceNotice compact className="px-1 pt-3 text-center" />;
 
   return (
     <div className="px-3 pt-3 flex flex-col gap-2">
@@ -27,17 +27,7 @@ export function SidebarFooter() {
           </kbd>
         </button>
       )}
-      <p className="px-1 text-[11px] text-neutral-400">
-        Powered by{" "}
-        <a
-          href={`https://mailflare.co/?ref=${typeof window !== "undefined" ? location.hostname : ""}&v=${packageJson.version}`}
-          target="_blank"
-          className="hover:underline text-neutral-500"
-          rel="noreferrer"
-        >
-          Mailflare v{packageJson.version}
-        </a>
-      </p>
+      <SourceNotice className="px-1" />
     </div>
   );
 }

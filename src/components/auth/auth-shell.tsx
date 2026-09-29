@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useBranding } from "@/components/branding-provider";
+import { SourceNotice } from "@/components/distribution/source-notice";
 import type { AuthShellProps } from "./types";
 
 export function AuthShell({
@@ -22,7 +23,7 @@ export function AuthShell({
   }, [branding.iconUrl]);
 
   return (
-    <div className="min-h-dvh bg-[#f1f4fa] px-4 py-6 text-neutral-900 sm:px-6 lg:flex lg:items-center lg:px-10 lg:py-10">
+    <div className="min-h-dvh bg-[#f1f4fa] px-4 py-6 text-neutral-900 sm:px-6 lg:flex lg:flex-col lg:items-center lg:justify-center lg:px-10 lg:py-10">
       <main className="mx-auto grid w-full max-w-6xl overflow-hidden rounded-4xl bg-white lg:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
         <section className="flex flex-col p-7 sm:p-10 lg:p-14">
           <div className="flex items-center gap-2">
@@ -85,6 +86,7 @@ export function AuthShell({
           )}
         </section>
       </main>
+      <SourceNotice className="mx-auto mt-4 w-full max-w-6xl text-center" />
     </div>
   );
 }
