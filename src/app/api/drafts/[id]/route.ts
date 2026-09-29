@@ -12,6 +12,7 @@ import { RequestBodyTooLargeError } from "@/lib/http/errors";
 import { getDraftSender, userOwnsDraft } from "../utils";
 import { listMessageAttachments } from "@/lib/email/attachments";
 import { deleteMessageWithObjects } from "@/lib/email/message-cleanup";
+import { invalidateDraftRepresentation } from "@/lib/email/canonical-message";
 import { parseAgentScheduledAt } from "@/lib/agent/schedule";
 
 export async function GET(request: Request, { params }: DraftRouteParams) {
@@ -77,6 +78,7 @@ export async function PATCH(request: Request, { params }: DraftRouteParams) {
 			htmlBody: html || null,
 		})
 		.where(eq(messages.id, id));
+	await invalidateDraftRepresentation(env, id);
 	await db.update(agentDraftMetadata).set({ revision: sql`${agentDraftMetadata.revision} + 1`, humanEditedAt: new Date(), ...(scheduledAt !== undefined ? { scheduledAt } : {}) }).where(eq(agentDraftMetadata.draftId, id));
 
 	return NextResponse.json({ draft: { id } });

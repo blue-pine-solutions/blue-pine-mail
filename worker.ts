@@ -17,6 +17,7 @@ import {
 	MAILFLARE_FORWARDED_HEADER,
 } from "./src/lib/email/account-forwarding";
 import { runScheduledDatabaseBackup } from "./src/lib/backups/runner";
+import { runCanonicalMessageMaintenance } from "./src/lib/email/canonical-message";
 import { processAgentDraftJob } from "./src/lib/agent/jobs/utils";
 import { runAgentMaintenance } from "./src/lib/agent/maintenance";
 export { RealtimeHub } from "./src/lib/realtime/hub";
@@ -124,5 +125,6 @@ export default {
 	async scheduled(controller: ScheduledController, env: CloudflareEnv, ctx: ExecutionContext) {
 		if (controller.cron === "0 2 * * *") ctx.waitUntil(runScheduledDatabaseBackup(env, new Date(controller.scheduledTime)));
 		ctx.waitUntil(runAgentMaintenance(env));
+		ctx.waitUntil(runCanonicalMessageMaintenance(env).catch((error) => console.error("Canonical message maintenance failed", error)));
 	},
 } satisfies ExportedHandler<CloudflareEnv>;

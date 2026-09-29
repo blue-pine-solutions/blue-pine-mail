@@ -1,5 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { messageAttachments, messages } from "@/db/schema";
+import { resolveCanonicalMessage } from "@/lib/email/canonical-message";
 import { newId } from "@/lib/ids";
 import { LIMITS } from "./constants";
 import { decodeBlobId, uploadBlobId } from "./ids";
@@ -75,24 +76,7 @@ export async function readBlob(ctx: JmapContext, blobId: string): Promise<{ body
 	}
 	const [row] = await ctx.db.select().from(messages).where(and(eq(messages.id, decoded.id))).limit(1);
 	if (!row || !row.mailboxId || !accessible.has(row.mailboxId)) return null;
-	if (row.rawR2Key) {
-		const object = await ctx.env.BUCKET.get(row.rawR2Key);
-		if (object) return { body: object.body, type: "message/rfc822", name: `${row.id}.eml`, size: object.size };
-	}
-	// Outbound and imported mail keeps no raw copy; rebuild a minimal RFC 5322 message.
-	const lines = [
-		`From: ${row.fromAddr}`,
-		`To: ${row.toAddr}`,
-		...(row.ccAddr ? [`Cc: ${row.ccAddr}`] : []),
-		`Subject: ${row.subject ?? ""}`,
-		`Date: ${row.createdAt.toUTCString()}`,
-		...(row.providerMessageId ? [`Message-ID: ${row.providerMessageId}`] : []),
-		...(row.inReplyTo ? [`In-Reply-To: <${row.inReplyTo}>`] : []),
-		"MIME-Version: 1.0",
-		`Content-Type: ${row.htmlBody ? "text/html" : "text/plain"}; charset=utf-8`,
-		"",
-		row.htmlBody ?? row.textBody ?? "",
-	];
-	const bytes = new TextEncoder().encode(lines.join("\r\n"));
-	return { body: bytes.buffer as ArrayBuffer, type: "message/rfc822", name: `${row.id}.eml`, size: bytes.byteLength };
+	// The message's canonical representation: the original bytes, or the stored copy Blue Pine generated.
+	const source = await resolveCanonicalMessage(ctx.env, row).catch(() => null);
+	return source ? { body: source.body, type: "message/rfc822", name: `${row.id}.eml`, size: source.size } : null;
 }

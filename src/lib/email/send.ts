@@ -13,6 +13,7 @@ import { loadMessageAttachmentContents, storeMessageAttachments, validateAttachm
 import type { AttachmentContent } from "@/lib/email/attachment-types";
 import { getOutboundAttachmentMaxMb } from "@/lib/email/attachment-policy";
 import { prepareCloudflareAttachments } from "@/lib/email/cloud-attachment-utils";
+import { storeSentCanonicalMessage } from "@/lib/email/canonical-message";
 
 export type SendEmailInput = {
 	userId: string;
@@ -220,6 +221,30 @@ async function deliverEmail(env: CloudflareEnv, delivery: PreparedDelivery): Pro
 			),
 		});
 
+		// The canonical copy is built from exactly what the transport accepted, under the
+		// Message-ID it assigned; a queued or failed send never gets one.
+		const canonicalKey = await storeSentCanonicalMessage(env, {
+			rowId: messageId,
+			from,
+			to,
+			cc,
+			bcc,
+			subject: input.subject,
+			messageId: response.messageId,
+			inReplyTo: headers["In-Reply-To"] ?? null,
+			references: (headers.References ?? "").split(/\s+/).filter(Boolean),
+			text: prepared.text ?? null,
+			html: prepared.html ?? null,
+			headers,
+			attachments: prepared.attachments.map((attachment) => ({
+				filename: attachment.filename,
+				type: attachment.type,
+				content: attachment.content,
+				disposition: attachment.disposition === "inline" && attachment.contentId ? "inline" : "attachment",
+				contentId: attachment.contentId ?? null,
+			})),
+		});
+
 		// A fresh message starts its own conversation; Cloudflare's Message-ID is what
 		// any reply will name in In-Reply-To, so key the thread by it.
 		await db
@@ -228,6 +253,7 @@ async function deliverEmail(env: CloudflareEnv, delivery: PreparedDelivery): Pro
 				status: "sent",
 				providerMessageId: response.messageId,
 				threadId: input.threadId ?? normalizeMessageId(response.messageId) ?? messageId,
+				...(canonicalKey ? { rawR2Key: canonicalKey } : {}),
 			})
 			.where(eq(messages.id, messageId));
 		await db.update(outboundJobs).set({ status: "sent", updatedAt: new Date() }).where(eq(outboundJobs.id, jobId));

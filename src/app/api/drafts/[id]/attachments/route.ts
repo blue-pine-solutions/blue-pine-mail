@@ -5,6 +5,7 @@ import { agentDraftMetadata, messages } from "@/db/schema";
 import { getCurrentUser } from "@/lib/auth/cookies";
 import { hasValidSessionMutationOrigin } from "@/lib/auth/origin";
 import { MAX_ATTACHMENT_COUNT, listMessageAttachments, storeMessageAttachments } from "@/lib/email/attachments";
+import { invalidateDraftRepresentation } from "@/lib/email/canonical-message";
 import { getOutboundAttachmentMaxMb } from "@/lib/email/attachment-policy";
 import { readFormDataBody } from "@/lib/http/request";
 import { RequestBodyTooLargeError } from "@/lib/http/errors";
@@ -30,6 +31,7 @@ export async function POST(request: Request, { params }: DraftAttachmentUploadPa
 	if (existing.length + files.length > MAX_ATTACHMENT_COUNT || files.some((file) => file.size > maxBytes) || existing.reduce((total, file) => total + file.size, 0) + files.reduce((total, file) => total + file.size, 0) > maxBytes) return Response.json({ error: "Draft attachments exceed the allowed count or outgoing size limit" }, { status: 400 });
 	try {
 		const attachments = await storeMessageAttachments(env, id, await Promise.all(files.map(async (file) => ({ filename: file.name, type: file.type || "application/octet-stream", content: await file.arrayBuffer(), disposition: "attachment" as const }))));
+		await invalidateDraftRepresentation(env, id);
 		await db.update(agentDraftMetadata).set({ revision: sql`${agentDraftMetadata.revision} + 1`, humanEditedAt: new Date() }).where(eq(agentDraftMetadata.draftId, id));
 		return Response.json({ attachments });
 	} catch (error) {

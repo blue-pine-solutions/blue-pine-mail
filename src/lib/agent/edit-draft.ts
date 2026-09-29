@@ -6,6 +6,7 @@ import { getAuthorizedSenderAddress } from "@/lib/email/sender";
 import { getEmailAddress, splitEmailAddressList } from "@/lib/email/address";
 import { getMailboxAccessLevel } from "@/lib/mailboxes/access";
 import { deleteMessageAttachment, getAttachmentForUser, MAX_ATTACHMENT_COUNT, MAX_TOTAL_ATTACHMENT_SIZE, storeMessageAttachments } from "@/lib/email/attachments";
+import { invalidateDraftRepresentation } from "@/lib/email/canonical-message";
 import type { AttachmentContent } from "@/lib/email/attachment-types";
 import type { AgentDraftEditInput, AgentToolContext } from "./types";
 import { formatAgentDraftBody } from "./draft-format";
@@ -57,5 +58,6 @@ export async function editAgentDraft(context: AgentToolContext, input: AgentDraf
 		subject: input.subject === undefined ? draft.subject : input.subject,
 		...(formattedBody ? { textBody: formattedBody.text, htmlBody: formattedBody.html, snippet: buildSnippet(formattedBody.text, null) } : {}),
 	}).where(eq(messages.id, draft.id));
+	await invalidateDraftRepresentation(context.env, draft.id);
 	return { draftId: draft.id, revision: updated.revision, status: "draft_updated", scheduledAt: updated.scheduledAt?.toISOString() ?? null, composerUrl: `/drafts/${encodeURIComponent(draft.id)}`, attachmentCount: remaining.length + additions.length };
 }
