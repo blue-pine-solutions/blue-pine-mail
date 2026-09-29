@@ -73,6 +73,36 @@ This builds with vinext and uploads the complete Worker with Wrangler. The Cloud
 
 To record the exact source of a deployment, set `BLUEPINE_BUILD_COMMIT` to the commit you deployed (for example as a Worker variable, from `git rev-parse HEAD`).
 
+### Deploy with an AI coding agent
+
+An agent with terminal access can run the manual deployment for you. Give it the Cloudflare account ID and **two separate scoped API tokens** through the agent's secret input, never in a public chat, a repository or a committed file:
+
+- **Deployment token** (used locally by Wrangler as `CLOUDFLARE_API_TOKEN`): scope it to the target account with **Workers Scripts Edit** (or **Workers Admin** where Cloudflare shows its newer granular roles, since this is a new Worker), **D1 Edit**, **Workers R2 Storage Edit**, **Queues Edit** and **Account Settings Read**. Add **Workers Routes Edit** for the target zone only if the agent should attach a custom domain or route. See Cloudflare's [token permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/) and [Workers roles](https://developers.cloudflare.com/workers/authorization/workers/).
+- **Runtime token** (stored as the Worker's `CF_TOKEN` secret): the permissions under [Required configuration](#required-configuration). It is separate from the deployment token and must cover the zones you will connect.
+
+The Worker and resource names below keep their upstream form for compatibility; do not rename them.
+
+```text
+Install Blue Pine Mail from https://github.com/bofa-ds/mailflare in my Cloudflare
+account, from the release tag or commit I name (default: the latest bluepine-v* release).
+Ask me for my Cloudflare account ID, a scoped deployment API token, and a separate
+runtime CF_TOKEN through a secret input. Never print, commit, or place either token
+in a command argument or a tracked file. Use the deployment token only for Wrangler
+authentication (CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID).
+
+Read README.md, docs/deployment.md, and wrangler.jsonc first. Keep the Worker name
+exactly mailflare. In the selected account, create or reuse the D1 database
+mailflare, R2 bucket mailflare-raw, and Queues mailflare-inbound,
+mailflare-outbound, and mailflare-agent. Set the D1 database_id in the local
+Wrangler config without committing that account-specific ID. Set the Worker variable
+BLUEPINE_BUILD_COMMIT to the deployed commit (git rev-parse HEAD). Install
+dependencies, run npm run deploy, and set the runtime CF_TOKEN as a Worker secret.
+Do not run remote D1 migrations manually; the /setup flow initializes the database.
+
+Give me the deployed URL and any remaining Cloudflare account actions. I will
+open /setup, create the first admin account, and connect my domain there.
+```
+
 ## Database migrations
 
 Deployment and database migration are separate. After a new build is deployed, open **Admin → Version and updates**. It shows whether the database matches this build; select **Update database** to apply pending migrations through the Worker's D1 binding. The same runner initializes a new database during setup.
