@@ -6,10 +6,11 @@ Blue Pine Mail is a downstream distribution of Mailflare. This file records wher
 |---|---|
 | Blue Pine repository | https://github.com/bofa-ds/mailflare (`origin`) |
 | Upstream | https://github.com/hieunc229/mailflare (`upstream`) |
-| Current Blue Pine HEAD | `40720fb` (2026-09-28) |
-| Current upstream base | `c57671f` (upstream `main`, 2026-09-28; package version 0.4.0) |
+| Current upstream base | `ccca978b777a3b9b8e9b75b6436e2d1b5427b9b5` (upstream `main`; package version 0.4.0), certified 2026-09-29 |
+| Blue Pine main containing it | `2f9be7b8642f1be8b60a1f266acb1909033e303a` (integration merge `0e28557`, promoted to `main` 2026-09-29) |
+| Previous upstream base | `c57671f` (2026-09-28) |
 
-Update the two SHAs above after every upstream integration.
+Update these SHAs after every upstream integration. The next integration merges new upstream commits on top of the current upstream base.
 
 ## Boundary
 
