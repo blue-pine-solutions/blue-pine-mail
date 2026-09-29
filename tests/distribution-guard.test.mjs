@@ -43,6 +43,21 @@ test("UPSTREAM.md records both repositories and the compatibility boundary", () 
 	assert.match(upstream, /verbatim and in order/, "UPSTREAM.md must require upstream migrations verbatim and in order");
 });
 
+const BROWSER_IDENTIFIERS = [
+	["src/components/messages/message-detail-navigation-utils.ts", 'const openedUnreadKey = "mailflare-navigation-opened-unread";'],
+	["src/components/messages/use-two-column-reading.ts", 'const STORAGE_KEY = "mailflare-two-column-reading";'],
+	["src/components/messages/use-two-column-reading.ts", 'const CHANGE_EVENT = "mailflare:two-column-reading-changed";'],
+];
+
+test("upstream browser storage keys and event names keep their names", () => {
+	const upstream = read("UPSTREAM.md");
+	for (const [path, declaration] of BROWSER_IDENTIFIERS) {
+		const identifier = declaration.match(/"([^"]+)"/)[1];
+		assert.ok(upstream.includes(`\`${identifier}\``), `UPSTREAM.md must list ${identifier} as compatibility-sensitive`);
+		assert.ok(read(path).includes(declaration), `${path} must keep ${identifier}`);
+	}
+});
+
 test("the distribution layer exists and stays independent of upstream licensing", () => {
 	for (const path of ["src/lib/distribution/identity.ts", "src/lib/distribution/features.ts", "src/lib/distribution/types.d.ts"]) {
 		assert.ok(existsSync(join(root, path)), `${path} must exist`);

@@ -78,8 +78,9 @@ These identifiers contain "mailflare" but carry data, protocol or deployment com
 | Existing `/api/v1` routes and API-key scope names | Customer integrations |
 | Existing MCP tool names and schemas | Configured MCP clients and agents |
 | Cloudflare resource names in `wrangler.jsonc` (Worker, D1, R2, queues) | Renaming creates new, empty resources |
+| Browser storage keys `mailflare-navigation-opened-unread` and `mailflare-two-column-reading`, window event `mailflare:two-column-reading-changed` | Persisted in users' browsers by upstream's reading UI; renaming discards saved reading state and preferences, and the event name must match between the components that dispatch and listen for it |
 
-Browser storage keys and window event names prefixed `mailflare` are not compatibility contracts in the same sense, but renaming them resets user preferences for no benefit. Leave them.
+Other browser storage keys and window event names prefixed `mailflare` follow the same rule: renaming them resets user preferences for no benefit. Leave them.
 
 ## Customer releases
 
