@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useBranding } from "@/components/branding-provider";
 import { useRouter } from "next/navigation";
 import { AlertTriangle, ArrowRight, CheckCircle2, LoaderCircle, MailPlus, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -21,6 +22,7 @@ import {
 import type { DomainPreflight, DomainSetupResult, SetupRequirementCheck } from "./types";
 
 export function RegisterClient() {
+  const { appName } = useBranding();
   const router = useRouter();
   const [hasAdminAccount, setHasAdminAccount] = useState<boolean | null>(null);
   const [hasPrimaryDomain, setHasPrimaryDomain] = useState<boolean | null>(
@@ -242,7 +244,7 @@ export function RegisterClient() {
       {step === 1 ? (
         <div className="space-y-5">
           <p className="text-sm leading-6 text-neutral-600">
-            Mailflare checks its required Cloudflare configuration and initializes a clean D1 database before setup continues.
+            {appName} checks its required Cloudflare configuration and initializes a clean D1 database before setup continues.
           </p>
           <div className="space-y-2">
             {loading && checks.length === 0 && (

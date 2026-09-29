@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useBranding } from "@/components/branding-provider";
 import { Copy, KeyRound, Plus, Trash2 } from "lucide-react";
 import { useSelectedMailbox } from "@/components/mailbox-provider";
 import { Badge } from "@/components/ui/badge";
@@ -17,6 +18,7 @@ import type { ManagedApiKey, McpKeyScope } from "./api-keys-settings-types";
 import { createManagedApiKey, keyPermissions, loadManagedApiKeys, MCP_KEY_SCOPES, revokeManagedApiKey, STANDARD_KEY_SCOPES } from "./api-keys-settings-utils";
 
 export function ApiKeysSettings() {
+	const { appName } = useBranding();
 	const { mailboxes, selectedMailbox } = useSelectedMailbox();
 	const [keys, setKeys] = useState<ManagedApiKey[]>([]);
 	const [loading, setLoading] = useState(true);
@@ -78,7 +80,7 @@ export function ApiKeysSettings() {
 				<DialogHeader><DialogTitle>{newKey ? "API key created" : "Create API key"}</DialogTitle><DialogDescription>{newKey ? "Copy this key now. It will only be shown once." : "Name your key and choose the access it needs."}</DialogDescription></DialogHeader>
 		{!newKey && <form onSubmit={(event) => void create(event)} className="space-y-4">
 			<div className="space-y-2"><Label htmlFor="managed-key-name">Key name</Label><Input id="managed-key-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={100} placeholder="My integration" /></div>
-			<label className="flex items-start gap-3 text-sm"><Checkbox checked={mcpAllowed} onChange={(event) => setMcpAllowed(event.target.checked)} /><span><strong>Allow MCP access</strong><span className="mt-1 block text-neutral-500">Use this key with an MCP client. Sending still needs your confirmation in Mailflare.</span></span></label>
+			<label className="flex items-start gap-3 text-sm"><Checkbox checked={mcpAllowed} onChange={(event) => setMcpAllowed(event.target.checked)} /><span><strong>Allow MCP access</strong><span className="mt-1 block text-neutral-500">Use this key with an MCP client. Sending still needs your confirmation in {appName}.</span></span></label>
 			<label className={`flex items-start gap-3 text-sm ${mcpAllowed ? "opacity-50" : ""}`}><Checkbox checked={!mcpAllowed && standardScopes.includes("jmap")} disabled={mcpAllowed} onChange={(event) => setStandardScopes((current) => event.target.checked ? [...current, "jmap"] : current.filter((scope) => scope !== "jmap"))} /><span><strong>Allow JMAP access</strong><span className="mt-1 block text-neutral-500">{mcpAllowed ? "JMAP access requires a separate standard API key." : "Read and send mail from a JMAP client."}</span></span></label>
 			<fieldset className="space-y-2"><legend className="text-sm font-medium">Permissions</legend>{(mcpAllowed ? MCP_KEY_SCOPES : STANDARD_KEY_SCOPES).map((scope) => <label key={scope.value} className="flex items-start gap-3 py-2 text-sm"><Checkbox checked={mcpAllowed ? mcpScopes.includes(scope.value as McpKeyScope) : standardScopes.includes(scope.value as ApiKeyScope)} onChange={(event) => { if (mcpAllowed) setMcpScopes((current) => event.target.checked ? [...current, scope.value as McpKeyScope] : current.filter((item) => item !== scope.value)); else setStandardScopes((current) => event.target.checked ? [...current, scope.value as ApiKeyScope] : current.filter((item) => item !== scope.value)); }} /><span><strong>{scope.label}</strong><span className="block text-neutral-500">{scope.description}</span></span></label>)}</fieldset>
 			<fieldset className="space-y-2"><legend className="text-sm font-medium">Allowed mailboxes</legend>{mailboxes.length === 0 ? <p className="text-sm text-neutral-500">No accessible mailboxes.</p> : mailboxes.map((mailbox) => <label key={mailbox.id} className="flex items-center gap-3 text-sm"><Checkbox checked={mailboxIds.includes(mailbox.id)} onChange={(event) => setMailboxIds((current) => event.target.checked ? [...current, mailbox.id] : current.filter((id) => id !== mailbox.id))} />{mailbox.localPart}@{mailbox.hostname}</label>)}<p className="text-xs text-neutral-500">Aliases share their parent mailbox and are included with it.</p></fieldset>

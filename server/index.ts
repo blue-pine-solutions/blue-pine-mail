@@ -4,6 +4,7 @@ import { parse } from "node:url";
 import next from "next";
 import { WebSocketServer } from "ws";
 import { getUserFromSession } from "@/lib/auth/session";
+import { DISTRIBUTION } from "@/lib/distribution/identity";
 import { getSessionTokenFromRequest } from "@/lib/realtime/utils";
 import { processInboundMessage } from "@/lib/email/inbound";
 import { processAgentDraftJob } from "@/lib/agent/jobs/utils";
@@ -72,7 +73,7 @@ async function main() {
 	});
 
 	server.listen(port, host, () => {
-		console.log(`Mailflare listening on http://${host}:${port} (data in ${runtime.dataDir})`);
+		console.log(`${DISTRIBUTION.name} listening on http://${host}:${port} (data in ${runtime.dataDir})`);
 	});
 
 	const smtpPort = Number(process.env.SMTP_INBOUND_PORT ?? 25);
@@ -100,6 +101,6 @@ async function main() {
 }
 
 main().catch((error) => {
-	console.error("Mailflare failed to start", error);
+	console.error(`${DISTRIBUTION.name} failed to start`, error);
 	process.exit(1);
 });

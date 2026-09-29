@@ -50,7 +50,7 @@ export default function DomainDnsDetails({
 							)}
 							<span className="min-w-0">
 								<span className="block font-medium text-neutral-900">Email Routing</span>
-								<span className="block text-xs text-neutral-500">Routes incoming email to Mailflare</span>
+								<span className="block text-xs text-neutral-500">Routes incoming email to this server</span>
 							</span>
 							<span className="min-w-0 break-all text-neutral-500">{routingLabel}</span>
 						</li>

@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useMemo } from "react";
+import { useBranding } from "@/components/branding-provider";
 import { Search, CornerDownLeft } from "lucide-react";
 import type { CommandItem } from "./types";
 import { filterCommands, groupCommandsByCategory } from "./command-palette-utils";
@@ -19,6 +20,7 @@ function CommandPaletteDialog({
   onClose: () => void;
   commands: CommandItem[];
 }) {
+  const { appName } = useBranding();
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -140,7 +142,7 @@ function CommandPaletteDialog({
               to select
             </span>
           </div>
-          <span className="text-[11px]">Mailflare Actions</span>
+          <span className="text-[11px]">{appName} Actions</span>
         </div>
       </div>
     </div>

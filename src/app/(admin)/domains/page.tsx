@@ -1,6 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useBranding } from "@/components/branding-provider";
 import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,6 +24,7 @@ import { SectionRowSkeleton } from "@/components/page-skeletons";
 import { checkDomain } from "./utils";
 
 export default function DomainsPage() {
+  const { appName } = useBranding();
   const qc = useQueryClient();
   const [hostname, setHostname] = useState("");
   // Self-hosted installs without Cloudflare credentials manage DNS by hand.
@@ -223,7 +225,7 @@ export default function DomainsPage() {
             <DialogHeader>
               <DialogTitle>Add domain</DialogTitle>
               <DialogDescription>
-                Connect a Cloudflare zone and choose whether Mailflare should
+                Connect a Cloudflare zone and choose whether {appName} should
                 provision Email Sending.
               </DialogDescription>
             </DialogHeader>

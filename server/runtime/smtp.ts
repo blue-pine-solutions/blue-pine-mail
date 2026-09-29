@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { SMTPServer } from "smtp-server";
 import type { SMTPServerSession } from "smtp-server";
+import { DISTRIBUTION } from "@/lib/distribution/identity";
 import { intakeIncomingMail } from "@/lib/email/intake";
 import { inboundAttachmentLimitReasonFromRaw } from "@/lib/email/inbound-attachments";
 import type { Mailer } from "./mailer";
@@ -24,7 +25,7 @@ export function startSmtpListener(
 		disabledCommands: options.tls ? ["AUTH"] : ["AUTH", "STARTTLS"],
 		...(options.tls ? { key: readFileSync(options.tls.keyPath), cert: readFileSync(options.tls.certPath) } : {}),
 		size: options.maxSize,
-		banner: "Mailflare",
+		banner: DISTRIBUTION.name,
 		onData(stream, session: SMTPServerSession, callback) {
 			const chunks: Buffer[] = [];
 			stream.on("data", (chunk: Buffer) => chunks.push(chunk));

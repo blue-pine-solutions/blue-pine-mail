@@ -6,7 +6,7 @@ export const MCP_KEY_SCOPES: { value: McpKeyScope; label: string; description: s
 	{ value: "mcp:read", label: "Read mail", description: "List, search, and read messages." },
 	{ value: "mcp:draft", label: "Manage drafts", description: "Create, edit, and discard drafts." },
 	{ value: "mcp:organize", label: "Organize mail", description: "Mark messages read and move them." },
-	{ value: "mcp:request-send", label: "Request send review", description: "Propose a send that you must confirm in Mailflare." },
+	{ value: "mcp:request-send", label: "Request send review", description: "Propose a send that you must confirm in the web app." },
 ];
 
 export const STANDARD_KEY_SCOPES: { value: ApiKeyScope; label: string; description: string }[] = [

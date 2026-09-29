@@ -33,7 +33,7 @@ export async function prepareCloudflareAttachments(
 		if (estimatedSize > GENERAL_MESSAGE_LIMIT_BYTES - MIME_SAFETY_MARGIN_BYTES) throw new Error("Message exceeds Cloudflare's 5 MiB email size limit");
 		return { attachments: direct, html: message.html, text: message.text };
 	}
-	const intro = "Files shared through Mailflare (download links expire after 30 days):";
+	const intro = "Files shared with you (download links expire after 30 days):";
 	const textLinks = linked.map((file) => `${file.filename} (${(file.size / 1_000_000).toFixed(1)} MB): ${file.url}`).join("\n");
 	const htmlLinks = linked.map((file) => `<li>${escapeHtml(file.filename)} (${(file.size / 1_000_000).toFixed(1)} MB): <a href="${escapeHtml(file.url)}">Download file</a></li>`).join("");
 	const text = [message.text?.trim(), intro, textLinks].filter(Boolean).join("\n\n");

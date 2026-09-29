@@ -4,8 +4,8 @@ import type { DnsAuthRecord, DnsAuthStatus, DomainPreflightResponse } from "./ty
 export const dnsAuthRecords: DnsAuthRecord[] = ["mx", "spf", "dkim", "dmarc"];
 
 export const dnsAuthDescriptions: Record<DnsAuthRecord, string> = {
-	mx: "Routes incoming email to Mailflare",
-	spf: "Authorizes Mailflare to send email",
+	mx: "Routes incoming email to this server",
+	spf: "Authorizes this server to send email",
 	dkim: "Signs outgoing email for deliverability",
 	dmarc: "Helps prevent email spoofing",
 };

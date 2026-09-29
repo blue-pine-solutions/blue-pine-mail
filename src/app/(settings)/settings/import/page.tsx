@@ -1,6 +1,7 @@
 "use client";
 
 import type { FormEvent } from "react";
+import { useBranding } from "@/components/branding-provider";
 import { useMemo, useState } from "react";
 import { Folder, Server, Upload } from "lucide-react";
 import { useSelectedMailbox } from "@/components/mailbox-provider";
@@ -51,6 +52,7 @@ const initialImapForm: ImapFormState = {
 const defaultSections = importSourceOptions.map((option) => option.value);
 
 export default function SettingsImportPage() {
+  const { appName } = useBranding();
   const { selectedMailbox } = useSelectedMailbox();
   const [activeTab, setActiveTab] = useState<ImportTab>("file");
   const [selectedSections, setSelectedSections] =
@@ -198,7 +200,7 @@ export default function SettingsImportPage() {
             Import mailbox
           </h2>
           <p className="mt-1 text-sm text-neutral-500">
-            Choose what to import and how Mailflare should receive it.
+            Choose what to import and how {appName} should receive it.
           </p>
         </div>
         <div className="space-y-1 overflow-hidden rounded-3xl">
@@ -419,7 +421,7 @@ export default function SettingsImportPage() {
                   <p className="rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-3 text-xs leading-5 text-neutral-500">
                     IMAP imports selected source sections automatically. Folders
                     are discovered from the source account and imported into
-                    matching new or existing Mailflare folders.
+                    matching new or existing {appName} folders.
                   </p>
                   <Button
                     type="submit"
