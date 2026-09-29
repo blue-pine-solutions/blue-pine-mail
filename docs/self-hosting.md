@@ -1,6 +1,6 @@
-# Self-hosting Blue Pine Mail (Docker)
+# Self-hosting Blue Pine Solutions Mail (Docker)
 
-Cloudflare Workers is Blue Pine Mail's primary deployment target (see [deployment](deployment.md)). The same code can also run as a single container on your own host. The container provides its own database (SQLite on a volume), blob storage (files on the same volume), job queue, realtime WebSocket, backup schedule and an SMTP listener for inbound mail.
+Cloudflare Workers is Blue Pine Solutions Mail's primary deployment target (see [deployment](deployment.md)). The same code can also run as a single container on your own host. The container provides its own database (SQLite on a volume), blob storage (files on the same volume), job queue, realtime WebSocket, backup schedule and an SMTP listener for inbound mail.
 
 ## Quick start
 
@@ -62,7 +62,7 @@ If `CF_TOKEN` can also edit DNS and Email Routing on your zones, adding a domain
 
 ## Operations
 
-- **Updates.** Admin → **Version and updates** reports when an approved Blue Pine Mail release (a GitHub Release tagged `bluepine-vMAJOR.MINOR.PATCH`) is newer than the installed version. It never installs anything. To update, check out the release tag, rebuild the image with the build argument above, and recreate the container; migrations run at start. Back up the volume first.
+- **Updates.** Admin → **Version and updates** reports when an approved Blue Pine Solutions Mail release (a GitHub Release tagged `bluepine-vMAJOR.MINOR.PATCH`) is newer than the installed version. It never installs anything. To update, check out the release tag, rebuild the image with the build argument above, and recreate the container; migrations run at start. Back up the volume first.
 - **Backups.** The daily 02:00 UTC backup and the admin Backups page export database records to `/data/blobs/backups`, on the same volume as the data. They are not an off-host copy: back up the whole volume to another machine for disaster recovery.
 - **Logs.** `docker compose logs -f mailflare`.
 - **Queues.** Jobs are held in memory. Inbound mail is written to the volume before it is queued, so a restart never loses a message; at worst one stays unparsed until it is re-imported.

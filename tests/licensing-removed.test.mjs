@@ -153,7 +153,7 @@ async function observedFeatures(context) {
 		forward: async (destination) => { forwards.push(destination); return true; },
 	});
 	return {
-		customBranding: branding.canCustomizeBranding && branding.appName !== "Blue Pine Mail" && renamed,
+		customBranding: branding.canCustomizeBranding && branding.appName !== "Blue Pine Solutions Mail" && renamed,
 		multipleAccounts: accounts,
 		sharedMailboxes: canCreateShared && delegated,
 		accountForwarding: forwardingChange && forwards.length === 1,

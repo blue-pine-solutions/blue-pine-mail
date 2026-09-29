@@ -130,8 +130,8 @@ test("checkForRelease fails gracefully and never throws", async () => {
 		assert.ok(result.reason.length > 0, label);
 	}
 	assert.equal((await app.checkForRelease({ env: { BLUEPINE_RELEASE_REPOSITORY: "bad value" }, fetch: () => { throw new Error("must not be called"); } })).state, "unavailable");
-	assert.match(app.describeRelease({ state: "unavailable", installed: "0.1.0", source: "x", reason: "The release source could not be reached" }, "Blue Pine Mail"), /Could not check for Blue Pine Mail releases/);
-	assert.match(app.describeRelease({ state: "update-available", installed: "0.1.0", latest: "0.1.1", tag: "t", releaseUrl: "u", source: "s" }, "Blue Pine Mail"), /^Blue Pine Mail 0\.1\.1 is available\. Deploy it/);
+	assert.match(app.describeRelease({ state: "unavailable", installed: "0.1.0", source: "x", reason: "The release source could not be reached" }, "Blue Pine Solutions Mail"), /Could not check for Blue Pine Solutions Mail releases/);
+	assert.match(app.describeRelease({ state: "update-available", installed: "0.1.0", latest: "0.1.1", tag: "t", releaseUrl: "u", source: "s" }, "Blue Pine Solutions Mail"), /^Blue Pine Solutions Mail 0\.1\.1 is available\. Deploy it/);
 });
 
 test("the update API is admin-only, check-only, and reports Blue Pine and upstream versions separately", async (t) => {
@@ -170,7 +170,7 @@ test("the update API is admin-only, check-only, and reports Blue Pine and upstre
 	const response = await call(app.updateRoute.GET, adminToken);
 	assert.equal(response.status, 200);
 	const body = await response.json();
-	assert.deepEqual(body.installed, { name: "Blue Pine Mail", version: "0.1.1", buildCommit: null, upstream: { name: "Mailflare", version: JSON.parse(read("package.json")).version } });
+	assert.deepEqual(body.installed, { name: "Blue Pine Solutions Mail", version: "0.1.1", buildCommit: null, upstream: { name: "Mailflare", version: JSON.parse(read("package.json")).version } });
 	assert.equal(body.release.state, "update-available");
 	assert.equal(body.release.latest, "0.2.0");
 

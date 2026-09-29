@@ -60,8 +60,8 @@ function withBuildCommit(t, value) {
 
 const text = (html) => html.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/\s+/g, " ");
 
-test("the distribution identity is Blue Pine Mail by Blue Pine Solutions, based on Mailflare, under the AGPL", () => {
-	assert.equal(app.DISTRIBUTION.name, "Blue Pine Mail");
+test("the distribution identity is Blue Pine Solutions Mail by Blue Pine Solutions, based on Mailflare, under the AGPL", () => {
+	assert.equal(app.DISTRIBUTION.name, "Blue Pine Solutions Mail");
 	assert.equal(app.DISTRIBUTION.vendor, "Blue Pine Solutions");
 	assert.equal(app.DISTRIBUTION.sourceRepository, DOWNSTREAM);
 	assert.equal(app.DISTRIBUTION.license, "AGPL-3.0-or-later");
@@ -91,7 +91,7 @@ test("the About page states the identity, attribution, license and exact-build s
 	withBuildCommit(t, SHA);
 	const html = app.renderToStaticMarkup(app.createElement(app.AboutPage));
 	const visible = text(html);
-	for (const phrase of ["About Blue Pine Mail", "Distributed by Blue Pine Solutions", `Mailflare ${app.DISTRIBUTION.upstream.version} by Hieu Nguyen`, SHA, "independent downstream distribution of Mailflare", "not affiliated with or endorsed by the Mailflare project or its author", "Mailflare is copyright Hieu Nguyen", "GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)", "without any warranty", "Corresponding Source"]) {
+	for (const phrase of ["About Blue Pine Solutions Mail", "Distributed by Blue Pine Solutions", `Mailflare ${app.DISTRIBUTION.upstream.version} by Hieu Nguyen`, SHA, "independent downstream distribution of Mailflare", "not affiliated with or endorsed by the Mailflare project or its author", "Mailflare is copyright Hieu Nguyen", "GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)", "without any warranty", "Corresponding Source"]) {
 		assert.ok(visible.includes(phrase), `About page should say: ${phrase}`);
 	}
 	assert.ok(html.includes(`href="${DOWNSTREAM}/tree/${SHA}"`), "links the exact build");
@@ -107,7 +107,7 @@ test("the About page states the identity, attribution, license and exact-build s
 test("the persistent source notice links Source and About and names the distribution", () => {
 	const full = app.renderToStaticMarkup(app.createElement(app.SourceNotice));
 	assert.ok(full.includes('href="/source"') && full.includes('href="/about"'));
-	assert.ok(text(full).includes(`Blue Pine Mail ${app.DISTRIBUTION.version}, based on Mailflare`));
+	assert.ok(text(full).includes(`Blue Pine Solutions Mail ${app.DISTRIBUTION.version}, based on Mailflare`));
 	const compact = app.renderToStaticMarkup(app.createElement(app.SourceNotice, { compact: true }));
 	assert.ok(compact.includes('href="/source"') && compact.includes('href="/about"'));
 	// It is shown in the app sidebar (dashboard, settings, admin) and on the sign-in and setup screens.
@@ -117,7 +117,7 @@ test("the persistent source notice links Source and About and names the distribu
 });
 
 test("branding and compatibility identifiers are unchanged", () => {
-	assert.equal(app.resolveAppName("Mailflare"), "Blue Pine Mail", "upstream seeded default still reads as uncustomized");
+	assert.equal(app.resolveAppName("Mailflare"), "Blue Pine Solutions Mail", "upstream seeded default still reads as uncustomized");
 	assert.equal(app.resolveAppName("Acme Mail"), "Acme Mail", "a real custom name is kept");
 	assert.equal(app.MAILFLARE_FORWARDED_HEADER, "X-Mailflare-Forwarded");
 	for (const path of ["src/lib/distribution/identity.ts", "src/app/about/page.tsx", "src/app/source/route.ts", "src/components/distribution/source-notice.tsx"]) {

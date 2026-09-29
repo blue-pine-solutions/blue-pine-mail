@@ -1,6 +1,6 @@
 # Upstream integration contract
 
-Blue Pine Mail is a downstream distribution of Mailflare. This file records where Blue Pine follows upstream, where it diverges, and how upstream changes are brought in. Read it before any architectural change.
+Blue Pine Solutions Mail is a downstream distribution of Mailflare. This file records where Blue Pine follows upstream, where it diverges, and how upstream changes are brought in. Read it before any architectural change.
 
 | | |
 |---|---|
@@ -55,11 +55,13 @@ Optional features (custom branding, multiple accounts, shared mailboxes, account
 
 ## Distribution identity and source offer
 
-- `src/lib/distribution/identity.ts` is the single source of the product name (Blue Pine Mail), distributor (Blue Pine Solutions), Blue Pine version, upstream attribution (Mailflare by Hieu Nguyen, upstream version from `package.json`) and license (AGPL-3.0-or-later).
+- `src/lib/distribution/identity.ts` is the single source of the product name (Blue Pine Solutions Mail), distributor (Blue Pine Solutions), Blue Pine version, upstream attribution (Mailflare by Hieu Nguyen, upstream version from `package.json`) and license (AGPL-3.0-or-later).
 - `/about` shows that identity; `/source` redirects to the Corresponding Source. The sidebar footer and the sign-in/setup screens link to both. Keep these reachable: they are the AGPL source offer for network users.
 - `BLUEPINE_BUILD_COMMIT` (a Docker build argument or runtime variable) makes `/source` point at the exact commit. Without it, the link falls back to the repository.
 - Admin-editable branding (`app_settings`) changes the app name users see, not the distribution identity on the About page or in `NOTICE`.
-- Keep upstream attribution in `NOTICE` and `LICENSE`; do not state or imply that Mailflare or its author endorses Blue Pine Mail.
+- Keep upstream attribution in `NOTICE` and `LICENSE`; do not state or imply that Mailflare or its author endorses Blue Pine Solutions Mail.
+- Releases 0.1.0 and 0.1.1 were published under the earlier product name "Blue Pine Mail". Their GitHub Releases, the `bluepine-v*` tags and the `blue-pine-mail` repository and asset file names keep that form; do not rename or rewrite them. A stored app name of "Blue Pine Mail" counts as never customized (`LEGACY_DEFAULT_APP_NAMES`).
+- Brand artwork: `brand/` holds the approved, operator-supplied masters, which are not served and must not be redrawn. The runtime copies (`public/brand/blue-pine-mail-logo.*`, `public/icon-192.png`, `public/icon-96.png`, `public/favicon.ico`) are resampled from them. The full logo appears on `/about` and, only while default branding is in effect, on the sign-in and setup screens; administrator branding always wins elsewhere.
 
 ## Never rename (compatibility)
 
@@ -86,7 +88,7 @@ Other browser storage keys and window event names prefixed `mailflare` follow th
 
 ## Customer releases
 
-Upstream Mailflare is an engineering input, never a customer update channel. Installations only learn about approved Blue Pine Mail releases: published (non-draft, non-prerelease) GitHub Releases tagged `bluepine-vMAJOR.MINOR.PATCH` in the Blue Pine repository, compared against `DISTRIBUTION.version`. The app checks for them but never installs or deploys; a release is rolled out with the installation's deployment method. Publish a release only for a commit that has passed the integration checks below.
+Upstream Mailflare is an engineering input, never a customer update channel. Installations only learn about approved Blue Pine Solutions Mail releases: published (non-draft, non-prerelease) GitHub Releases tagged `bluepine-vMAJOR.MINOR.PATCH` in the Blue Pine repository, compared against `DISTRIBUTION.version`. The app checks for them but never installs or deploys; a release is rolled out with the installation's deployment method. Publish a release only for a commit that has passed the integration checks below.
 
 The public repository is the Corresponding Source for every build offered to users. Publish a commit there, by pushing it with an explicit refspec (`git push public <sha>:refs/heads/main`, never `--all`, `--mirror` or `--tags`), before any installation runs it, and confirm with `npm run release:verify-source -- <sha>` that `/source` for that build resolves publicly.
 

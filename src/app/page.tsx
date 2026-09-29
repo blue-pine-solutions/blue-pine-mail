@@ -7,6 +7,7 @@ import { HomeAuthProvider } from "./home-auth";
 import { HomeHeaderActions } from "./home-header-actions";
 import { HomeHeroActions } from "./home-hero-actions";
 import { SourceNotice } from "@/components/distribution/source-notice";
+import { DEFAULT_ICON_URL } from "@/components/branding-provider-utils";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +31,7 @@ export default async function HomePage() {
           className="flex items-center gap-3"
           aria-label={`${branding.appName} home`}
         >
-          <img src={branding.hasCustomIcon ? "/api/branding/icon" : "/icon-96.png"} height={32} width={32} alt="" />
+          <img src={branding.hasCustomIcon ? "/api/branding/icon" : DEFAULT_ICON_URL} height={32} width={32} alt="" />
           <span className="text-base font-semibold tracking-tight">
             {branding.appName}
           </span>

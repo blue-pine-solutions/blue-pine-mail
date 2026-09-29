@@ -5,7 +5,7 @@ import type { VersionStatus } from "./types";
 import { authorizeAdminRequest } from "./utils";
 
 /**
- * The installed Blue Pine Mail version and whether a newer approved Blue Pine
+ * The installed Blue Pine Solutions Mail version and whether a newer approved Blue Pine
  * release has been published. Check only: nothing here installs or deploys.
  */
 export async function GET(request: Request) {

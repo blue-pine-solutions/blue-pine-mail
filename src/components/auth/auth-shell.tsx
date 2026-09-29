@@ -2,7 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { useBranding } from "@/components/branding-provider";
+import { DEFAULT_LOGO } from "@/components/branding-provider-utils";
 import { SourceNotice } from "@/components/distribution/source-notice";
+import { isDefaultBranding } from "@/lib/branding/utils";
 import type { AuthShellProps } from "./types";
 
 export function AuthShell({
@@ -26,26 +28,41 @@ export function AuthShell({
     <div className="min-h-dvh bg-[#f1f4fa] px-4 py-6 text-neutral-900 sm:px-6 lg:flex lg:flex-col lg:items-center lg:justify-center lg:px-10 lg:py-10">
       <main className="mx-auto grid w-full max-w-6xl overflow-hidden rounded-4xl bg-white lg:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
         <section className="flex flex-col p-7 sm:p-10 lg:p-14">
-          <div className="flex items-center gap-2">
-            <span className="flex items-center justify-center overflow-hidden">
-              {iconFailed ? (
-                <Icon className="h-8 w-8 text-blue-600" />
-              ) : (
-                <img
-                  src={iconUrl}
-                  onError={() => {
-                    if (iconUrl !== "/icon-96.png") setIconUrl("/icon-96.png");
-                    else setIconFailed(true);
-                  }}
-                  alt=""
-                  className="h-8 w-8 object-contain"
-                />
-              )}
-            </span>
-            <span className="truncate text-md font-semibold text-neutral-800">
-              {branding.appName}
-            </span>
-          </div>
+          {!branding.loaded ? (
+            <div className="h-8" aria-hidden="true" />
+          ) : isDefaultBranding(branding) ? (
+            <picture className="block w-36 sm:w-48 lg:w-72">
+              <source srcSet={DEFAULT_LOGO.webp} type="image/webp" />
+              <img
+                src={DEFAULT_LOGO.png}
+                width={DEFAULT_LOGO.width}
+                height={DEFAULT_LOGO.height}
+                alt={branding.appName}
+                className="h-auto w-full"
+              />
+            </picture>
+          ) : (
+            <div className="flex items-center gap-2">
+              <span className="flex items-center justify-center overflow-hidden">
+                {iconFailed ? (
+                  <Icon className="h-8 w-8 text-blue-600" />
+                ) : (
+                  <img
+                    src={iconUrl}
+                    onError={() => {
+                      if (iconUrl !== "/icon-96.png") setIconUrl("/icon-96.png");
+                      else setIconFailed(true);
+                    }}
+                    alt=""
+                    className="h-8 w-8 object-contain"
+                  />
+                )}
+              </span>
+              <span className="truncate text-md font-semibold text-neutral-800">
+                {branding.appName}
+              </span>
+            </div>
+          )}
 
           <div className="mt-2 lg:mt-8">
             <h1 className="max-w-md text-xl font-medium leading-tight tracking-tight text-neutral-950 sm:text-4xl">

@@ -18,10 +18,10 @@ test("LICENSE keeps the upstream Mailflare copyright notice", () => {
 	assert.match(license, /Copyright \(C\) 2026 Hieu Nguyen/);
 });
 
-test("NOTICE identifies Blue Pine Mail as a modified downstream version", () => {
+test("NOTICE identifies Blue Pine Solutions Mail as a modified downstream version", () => {
 	assert.ok(existsSync(join(root, "NOTICE")), "NOTICE must exist");
 	const notice = read("NOTICE");
-	assert.match(notice, /Blue Pine Mail is a modified, downstream version of Mailflare/);
+	assert.match(notice, /Blue Pine Solutions Mail is a modified, downstream version of Mailflare/);
 	assert.ok(notice.includes(UPSTREAM_REPOSITORY), "NOTICE must name the upstream project");
 	assert.match(notice, /Hieu Nguyen/, "NOTICE must keep the upstream copyright");
 	assert.match(notice, /Blue Pine Solutions/);
@@ -129,9 +129,9 @@ test("forwarding follows Blue Pine policy and keeps the X-Mailflare-Forwarded lo
 
 const DOCUMENTS = ["README.md", ...readdirSync(join(root, "docs")).filter((name) => name.endsWith(".md")).map((name) => `docs/${name}`), "deploy/cloudflare-email-relay/README.md"];
 
-test("the README presents Blue Pine Mail as a downstream of Mailflare under the AGPL", () => {
+test("the README presents Blue Pine Solutions Mail as a downstream of Mailflare under the AGPL", () => {
 	const readme = read("README.md");
-	assert.match(readme, /^# Blue Pine Mail\b/);
+	assert.match(readme, /^# Blue Pine Solutions Mail\b/);
 	assert.match(readme, /Blue Pine Solutions/);
 	assert.ok(readme.includes(UPSTREAM_REPOSITORY), "README must link the upstream project");
 	assert.match(readme, /Hieu Nguyen/);
@@ -175,7 +175,7 @@ test("source, release and deployment links name the public Blue Pine repository,
 	assert.match(read("src/lib/distribution/identity.ts"), /sourceRepository: "https:\/\/github\.com\/blue-pine-solutions\/blue-pine-mail",/);
 	assert.ok(read("docs/deployment.md").includes(`(https://deploy.workers.cloudflare.com/?url=${BLUE_PINE_REPOSITORY})`), "the Deploy button deploys the public repository");
 	assert.ok(read("docs/self-hosting.md").includes(`git clone ${BLUE_PINE_REPOSITORY} `), "self-hosting clones the public repository");
-	assert.match(read("NOTICE"), new RegExp(`Corresponding Source for Blue Pine Mail is available at:\\s+${BLUE_PINE_REPOSITORY.replaceAll(".", "\\.")}\\s`));
+	assert.match(read("NOTICE"), new RegExp(`Corresponding Source for Blue Pine Solutions Mail is available at:\\s+${BLUE_PINE_REPOSITORY.replaceAll(".", "\\.")}\\s`));
 	assert.match(read("package.json"), /"release:verify-source": "node scripts\/verify-public-source\.mjs"/);
 });
 

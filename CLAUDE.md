@@ -120,7 +120,7 @@ Mailbox authorization is separate from user role and goes through `src/lib/mailb
 
 ### Version and updates
 
-The admin "Version and updates" card (`/api/admin/update`, GET only) shows the installed Blue Pine Mail version and build, and checks for approved releases: published GitHub Releases tagged `bluepine-vMAJOR.MINOR.PATCH` in the Blue Pine repository (`src/lib/distribution/releases.ts`; `BLUEPINE_RELEASE_REPOSITORY` overrides it). It never installs or deploys anything and never looks at upstream Mailflare. Upstream's workflow that replaced the installation repository with upstream `main` has been removed. The same card reports and applies pending database migrations through `/api/admin/migrations`.
+The admin "Version and updates" card (`/api/admin/update`, GET only) shows the installed Blue Pine Solutions Mail version and build, and checks for approved releases: published GitHub Releases tagged `bluepine-vMAJOR.MINOR.PATCH` in the Blue Pine repository (`src/lib/distribution/releases.ts`; `BLUEPINE_RELEASE_REPOSITORY` overrides it). It never installs or deploys anything and never looks at upstream Mailflare. Upstream's workflow that replaced the installation repository with upstream `main` has been removed. The same card reports and applies pending database migrations through `/api/admin/migrations`.
 
 ## Conventions
 
@@ -133,7 +133,7 @@ The admin "Version and updates" card (`/api/admin/update`, GET only) shows the i
 
 ## Blue Pine downstream distribution
 
-This repository is **Blue Pine Mail**, a downstream distribution derived from Mailflare (`upstream` = hieunc229/mailflare; `origin` = Blue Pine's private development repository; `public` = blue-pine-solutions/blue-pine-mail, the public source and release repository). `NOTICE` records the attribution and the modifications made so far. **Read `UPSTREAM.md` before any architectural change**; it is the engine/product boundary and the upstream integration contract.
+This repository is **Blue Pine Solutions Mail**, a downstream distribution derived from Mailflare (`upstream` = hieunc229/mailflare; `origin` = Blue Pine's private development repository; `public` = blue-pine-solutions/blue-pine-mail, the public source and release repository). `NOTICE` records the attribution and the modifications made so far. **Read `UPSTREAM.md` before any architectural change**; it is the engine/product boundary and the upstream integration contract.
 
 - **Engine follows upstream, product layer is Blue Pine's.** Schema, migrations, mail pipeline, routing, SMTP, JMAP, API v1, MCP tools, relay protocol, auth and runtime contracts stay upstream-shaped. Identity, feature policy, commercial policy, branding policy, legal/source surfaces, the release channel and operations belong to Blue Pine.
 - **Never casually rename compatibility-sensitive `mailflare` identifiers** (headers, stored HTML markers, backup format id, storage keys, env vars, `mailflare.sqlite`, ICS UIDs). The full list is in `UPSTREAM.md`. The word "Mailflare" in code is not by itself a reason to change it.

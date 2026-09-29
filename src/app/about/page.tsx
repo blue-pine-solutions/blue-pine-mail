@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { DEFAULT_LOGO } from "@/components/branding-provider-utils";
 import { DISTRIBUTION, getBuildCommit, getSourceUrl } from "@/lib/distribution/identity";
 
 // Build details come from the runtime environment, so render on each request.
@@ -23,6 +24,11 @@ export default function AboutPage() {
 	return (
 		<div className="min-h-dvh bg-[#f1f4fa] px-4 py-10 text-neutral-900">
 			<main className="mx-auto max-w-2xl space-y-6 rounded-3xl bg-white p-8">
+				{/* This page always describes the distribution itself, so it shows the distribution's logo whatever the branding. */}
+				<picture className="block w-40 sm:w-56">
+					<source srcSet={DEFAULT_LOGO.webp} type="image/webp" />
+					<img src={DEFAULT_LOGO.png} width={DEFAULT_LOGO.width} height={DEFAULT_LOGO.height} alt={`${DISTRIBUTION.name} logo`} className="h-auto w-full" />
+				</picture>
 				<h1 className="text-2xl font-semibold">About {DISTRIBUTION.name}</h1>
 				<dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-3 text-sm">
 					{rows.map(({ label, value }) => (

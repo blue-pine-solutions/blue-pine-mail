@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, CircleX, Database, PackageCheck, RefreshCw } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { DISTRIBUTION } from "@/lib/distribution/identity";
 import { applyDatabaseMigrations, describeRelease, getMigrationStatus, getVersionStatus } from "./admin-update-card-utils";
 import type { MigrationStatusResponse, VersionStatusResponse } from "./admin-update-card-types";
 
@@ -145,7 +146,7 @@ export function AdminUpdateCard() {
 					{!isCheckingMigrations && !!migrationStatus?.unknown.length && (
 						<div className="flex items-center gap-3 px-4 py-4 text-sm text-red-600">
 							<CircleX className="h-4 w-4 shrink-0" />
-							This database has migrations this build does not include. Deploy the matching {installed?.name ?? "Blue Pine Mail"} release before changing it.
+							This database has migrations this build does not include. Deploy the matching {installed?.name ?? DISTRIBUTION.name} release before changing it.
 						</div>
 					)}
 				</div>

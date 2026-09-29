@@ -99,30 +99,41 @@ async function iconBytes() {
 	return new Uint8Array(await (await getBrandingIconRoute(new Request("http://mailflare.local/api/branding/icon"))).arrayBuffer());
 }
 
-test("an empty or upstream-default stored name resolves to Blue Pine Mail; any other name is kept", () => {
-	assert.equal(resolveAppName(undefined), "Blue Pine Mail");
-	assert.equal(resolveAppName(null), "Blue Pine Mail");
-	assert.equal(resolveAppName(""), "Blue Pine Mail");
-	assert.equal(resolveAppName("Mailflare"), "Blue Pine Mail");
+test("an empty or upstream-default stored name resolves to Blue Pine Solutions Mail; any other name is kept", () => {
+	assert.equal(resolveAppName(undefined), "Blue Pine Solutions Mail");
+	assert.equal(resolveAppName(null), "Blue Pine Solutions Mail");
+	assert.equal(resolveAppName(""), "Blue Pine Solutions Mail");
+	assert.equal(resolveAppName("Mailflare"), "Blue Pine Solutions Mail");
 	assert.equal(resolveAppName("Acme Mail"), "Acme Mail");
 	assert.equal(resolveAppName("mailflare"), "mailflare", "only the exact seeded value counts as uncustomized");
+	// 0.1.0 and 0.1.1 defaulted to "Blue Pine Mail" and the branding form saves the prefilled name.
+	assert.equal(resolveAppName("Blue Pine Mail"), "Blue Pine Solutions Mail", "the previous default counts as uncustomized");
+	assert.equal(resolveAppName("Blue Pine Mail Team"), "Blue Pine Mail Team", "only the exact previous default is mapped");
 });
 
-test("an installation without a stored name shows Blue Pine Mail", async (t) => {
+test("an installation without a stored name shows Blue Pine Solutions Mail", async (t) => {
 	setDisabledFeatures(t, undefined);
 	const { database, env } = await install(t);
 	database.db.exec("DELETE FROM app_settings");
-	assert.deepEqual(await getBranding(env), { appName: "Blue Pine Mail", hasCustomIcon: false, canCustomizeBranding: true });
+	assert.deepEqual(await getBranding(env), { appName: "Blue Pine Solutions Mail", hasCustomIcon: false, canCustomizeBranding: true });
 });
 
-test("the upstream seeded 'Mailflare' shows Blue Pine Mail without rewriting the database", async (t) => {
+test("the upstream seeded 'Mailflare' shows Blue Pine Solutions Mail without rewriting the database", async (t) => {
 	setDisabledFeatures(t, undefined);
 	const { env, storedName } = await install(t);
 	assert.equal(storedName(), "Mailflare");
 	const response = await getBrandingRoute();
-	assert.deepEqual(await response.json(), { appName: "Blue Pine Mail", hasCustomIcon: false, canCustomizeBranding: true });
-	assert.equal((await getBranding(env)).appName, "Blue Pine Mail");
+	assert.deepEqual(await response.json(), { appName: "Blue Pine Solutions Mail", hasCustomIcon: false, canCustomizeBranding: true });
+	assert.equal((await getBranding(env)).appName, "Blue Pine Solutions Mail");
 	assert.equal(storedName(), "Mailflare");
+});
+
+test("a stored 'Blue Pine Mail' from 0.1.x shows Blue Pine Solutions Mail without rewriting the database", async (t) => {
+	setDisabledFeatures(t, undefined);
+	const { database, env, storedName } = await install(t);
+	database.db.prepare("UPDATE app_settings SET app_name = ? WHERE id = 'default'").run("Blue Pine Mail");
+	assert.deepEqual(await getBranding(env), { appName: "Blue Pine Solutions Mail", hasCustomIcon: false, canCustomizeBranding: true });
+	assert.equal(storedName(), "Blue Pine Mail");
 });
 
 test("with custom branding enabled an admin can set a name and icon without any license", async (t) => {
@@ -151,7 +162,7 @@ test("with custom branding disabled, changes are refused by policy and saved bra
 	assert.doesNotMatch(error, LICENSE_WORDING);
 	await assert.rejects(updateBranding(env, { appName: "Other Mail" }), (thrown) => thrown instanceof BrandingDisabledError);
 
-	assert.deepEqual(await (await getBrandingRoute()).json(), { appName: "Blue Pine Mail", hasCustomIcon: false, canCustomizeBranding: false });
+	assert.deepEqual(await (await getBrandingRoute()).json(), { appName: "Blue Pine Solutions Mail", hasCustomIcon: false, canCustomizeBranding: false });
 	assert.deepEqual(await iconBytes(), DEFAULT_ICON);
 	assert.equal(storedName(), "Acme Mail");
 	assert.equal(storedIconKey(), "branding/app-icon");

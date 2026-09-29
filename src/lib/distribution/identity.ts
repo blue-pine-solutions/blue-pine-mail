@@ -2,11 +2,11 @@ import packageJson from "../../../package.json";
 import type { DistributionEnv, DistributionIdentity } from "./types";
 
 /**
- * Who this distribution is: Blue Pine Mail, a downstream of Mailflare. This is
+ * Who this distribution is: Blue Pine Solutions Mail, a downstream of Mailflare. This is
  * fixed per build and separate from the admin-editable branding in app_settings.
  */
 export const DISTRIBUTION: DistributionIdentity = {
-	name: "Blue Pine Mail",
+	name: "Blue Pine Solutions Mail",
 	vendor: "Blue Pine Solutions",
 	version: "0.1.1",
 	sourceRepository: "https://github.com/blue-pine-solutions/blue-pine-mail",

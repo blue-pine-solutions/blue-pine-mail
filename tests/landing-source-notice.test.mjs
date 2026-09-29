@@ -70,10 +70,10 @@ test("the public landing page offers Source and About under the default identity
 	await install(t);
 	const html = await renderHome();
 	assertSourceNotice(html);
-	assert.ok(html.includes('aria-label="Blue Pine Mail home"'), "the uncustomized app name is Blue Pine Mail");
+	assert.ok(html.includes('aria-label="Blue Pine Solutions Mail home"'), "the uncustomized app name is Blue Pine Solutions Mail");
 });
 
-test("custom branding renames the landing page but the source notice still names Blue Pine Mail", async (t) => {
+test("custom branding renames the landing page but the source notice still names Blue Pine Solutions Mail", async (t) => {
 	const database = await install(t);
 	database.db.prepare("UPDATE app_settings SET app_name = ? WHERE id = 'default'").run("Acme Mail");
 	const html = await renderHome();

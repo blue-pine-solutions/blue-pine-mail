@@ -1,8 +1,8 @@
-# Blue Pine Mail
+# Blue Pine Solutions Mail
 
-Blue Pine Mail is a self-hosted email inbox for custom domains, distributed by Blue Pine Solutions.
+Blue Pine Solutions Mail is a self-hosted email inbox for custom domains, distributed by Blue Pine Solutions.
 
-It is an independent downstream distribution of [Mailflare](https://github.com/hieunc229/mailflare) by Hieu Nguyen. Blue Pine Mail is not affiliated with or endorsed by the Mailflare project or its author. See [NOTICE](NOTICE) for attribution and the list of downstream changes.
+It is an independent downstream distribution of [Mailflare](https://github.com/hieunc229/mailflare) by Hieu Nguyen. Blue Pine Solutions Mail is not affiliated with or endorsed by the Mailflare project or its author. See [NOTICE](NOTICE) for attribution and the list of downstream changes.
 
 ## What you can do
 
@@ -28,8 +28,8 @@ Cloudflare charges depend on your plan and usage; check Cloudflare's current pri
 
 ## Versions, updates and source
 
-- **Blue Pine Mail version** is the distribution's own version. The **Mailflare base** it was built from is shown separately. Both appear under **Admin → Version and updates** and on the **About** page.
-- **Updates** come only from approved Blue Pine Mail releases: published GitHub Releases tagged `bluepine-vMAJOR.MINOR.PATCH`. The app checks for them but never installs anything; you deploy a release with the method your installation uses.
+- **Blue Pine Solutions Mail version** is the distribution's own version. The **Mailflare base** it was built from is shown separately. Both appear under **Admin → Version and updates** and on the **About** page.
+- **Updates** come only from approved Blue Pine Solutions Mail releases: published GitHub Releases tagged `bluepine-vMAJOR.MINOR.PATCH`. The app checks for them but never installs anything; you deploy a release with the method your installation uses.
 - **Source**: every page links to **Source** and **About**. `/source` leads to the source of the running build: the exact commit when the build records `BLUEPINE_BUILD_COMMIT`, otherwise this repository.
 
 ## Current limitations
@@ -55,7 +55,7 @@ Some internal names keep their upstream form for compatibility (for example the 
 
 ## Upstream integration
 
-This repository follows Mailflare as an engineering input, not as an update source for installations. Upstream changes are merged on an integration branch, reviewed and tested, then shipped as a Blue Pine Mail release. [UPSTREAM.md](UPSTREAM.md) describes the process and the boundary between upstream engine code and Blue Pine's product layer. Generic fixes are offered back to Mailflare where they fit.
+This repository follows Mailflare as an engineering input, not as an update source for installations. Upstream changes are merged on an integration branch, reviewed and tested, then shipped as a Blue Pine Solutions Mail release. [UPSTREAM.md](UPSTREAM.md) describes the process and the boundary between upstream engine code and Blue Pine's product layer. Generic fixes are offered back to Mailflare where they fit.
 
 ## Documentation
 
@@ -68,4 +68,4 @@ This repository follows Mailflare as an engineering input, not as an update sour
 
 ## License
 
-Blue Pine Mail is free software under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). See [LICENSE](LICENSE) and [NOTICE](NOTICE). If you run a modified version for others over a network, the AGPL requires you to offer them its source.
+Blue Pine Solutions Mail is free software under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). See [LICENSE](LICENSE) and [NOTICE](NOTICE). If you run a modified version for others over a network, the AGPL requires you to offer them its source.

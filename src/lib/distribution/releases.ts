@@ -2,7 +2,7 @@ import { DISTRIBUTION } from "./identity";
 import type { DistributionEnv, ReleaseCheck, ReleaseSource } from "./types";
 
 /**
- * The Blue Pine Mail release channel. It only reports whether an approved
+ * The Blue Pine Solutions Mail release channel. It only reports whether an approved
  * release exists; installing one is a deployment step outside the app.
  *
  * An approved release is a published (not draft, not prerelease) GitHub

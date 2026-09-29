@@ -1,8 +1,8 @@
-Blue Pine Mail
-==============
+Blue Pine Solutions Mail
+========================
 
-Blue Pine Mail is a modified, downstream version of Mailflare. It is
-distributed by Blue Pine Solutions.
+Blue Pine Solutions Mail is a modified, downstream version of Mailflare.
+It is distributed by Blue Pine Solutions.
 
 Upstream project
 ----------------
@@ -31,14 +31,17 @@ Downstream changes in this repository to date:
   upstream's commercial license tiers.
 - Upstream's commercial licensing integration (Paymug license activation
   and the related pricing and upgrade screens) has been removed.
-- The product is identified as Blue Pine Mail, with an About page and a
-  source link in the application, and user-facing text names Blue Pine
-  Mail or the administrator's configured app name.
+- The product is identified as Blue Pine Solutions Mail, with an About
+  page and a source link in the application, and user-facing text names
+  Blue Pine Solutions Mail or the administrator's configured app name.
+  Releases 0.1.0 and 0.1.1 were published under the earlier name Blue
+  Pine Mail; the repository and release tag names keep that form.
 - Upstream's in-app updater, which replaced an installation with the
   latest upstream code, has been removed. The application now only checks
-  for approved Blue Pine Mail releases and never installs them itself.
-- The documentation describes the Blue Pine Mail distribution; upstream
-  sponsorship, pricing and promotional material has been removed.
+  for approved Blue Pine Solutions Mail releases and never installs them
+  itself.
+- The documentation describes the Blue Pine Solutions Mail distribution;
+  upstream sponsorship, pricing and promotional material has been removed.
 
 The git history of https://github.com/blue-pine-solutions/blue-pine-mail
 identifies each change individually.
@@ -52,7 +55,7 @@ provided without warranty, as described in LICENSE.
 
 Corresponding Source
 --------------------
-The Corresponding Source for Blue Pine Mail is available at:
+The Corresponding Source for Blue Pine Solutions Mail is available at:
 https://github.com/blue-pine-solutions/blue-pine-mail
 
 A running installation offers its source from the "Source" link in the
@@ -62,7 +65,7 @@ running build; otherwise it points to the repository above.
 
 Affiliation
 -----------
-Blue Pine Mail is an independent downstream distribution. It is not
-affiliated with or endorsed by the upstream Mailflare project or its
+Blue Pine Solutions Mail is an independent downstream distribution. It is
+not affiliated with or endorsed by the upstream Mailflare project or its
 author. "Mailflare" refers to the upstream project and is used here only
 to identify the origin of this work.

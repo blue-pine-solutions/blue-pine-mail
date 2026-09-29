@@ -86,10 +86,10 @@ test("customer-branded screens take the configured app name", () => {
 		assert.match(source, /import \{ useBranding \} from "@\/components\/branding-provider";/, path);
 		assert.match(source, /const \{ appName \} = useBranding\(\);/, path);
 	}
-	// Default installation (no custom name, or upstream's seeded "Mailflare") shows Blue Pine Mail.
+	// Default installation (no custom name, or upstream's seeded "Mailflare") shows Blue Pine Solutions Mail.
 	const html = app.renderToStaticMarkup(app.createElement(app.BrowserNotificationSettings));
-	assert.ok(html.includes("while Blue Pine Mail is open"));
-	assert.equal(app.resolveAppName("Mailflare"), "Blue Pine Mail");
+	assert.ok(html.includes("while Blue Pine Solutions Mail is open"));
+	assert.equal(app.resolveAppName("Mailflare"), "Blue Pine Solutions Mail");
 	assert.equal(app.resolveAppName("Acme Mail"), "Acme Mail");
 	// A custom name flows into the MCP connection prompt.
 	const prompt = app.buildMcpAgentPrompt("", { mode: "mail", apiKey: "k" }, "Acme Mail");
@@ -99,13 +99,13 @@ test("customer-branded screens take the configured app name", () => {
 	assert.doesNotMatch(prompt, /mailflare/i);
 });
 
-test("calendar invitations say Blue Pine Mail but keep the stable UID suffix", () => {
+test("calendar invitations say Blue Pine Solutions Mail but keep the stable UID suffix", () => {
 	const ics = new TextDecoder().decode(app.createCalendarInvitation({ title: "T", description: "", location: "", startsAt: new Date(0), endsAt: new Date(3600_000), uid: "evt-1" }));
-	assert.match(ics, /^PRODID:-\/\/Blue Pine Mail\/\/Calendar\/\/EN$/m);
+	assert.match(ics, /^PRODID:-\/\/Blue Pine Solutions Mail\/\/Calendar\/\/EN$/m);
 	assert.match(ics, /^UID:evt-1@mailflare$/m, "UID suffix is unchanged so existing invitations still update");
 });
 
-test("the Node SMTP greeting names Blue Pine Mail", async (t) => {
+test("the Node SMTP greeting names Blue Pine Solutions Mail", async (t) => {
 	const env = { DB: null, BUCKET: null, INBOUND_QUEUE: null };
 	const server = app.startSmtpListener(env, { sendRaw: async () => true }, { port: 0, host: "127.0.0.1", maxSize: 1000, tls: null });
 	if (!server.server.listening) await once(server.server, "listening");
@@ -113,7 +113,7 @@ test("the Node SMTP greeting names Blue Pine Mail", async (t) => {
 	const socket = connect(server.server.address().port, "127.0.0.1");
 	const [greeting] = await once(socket, "data");
 	socket.end();
-	assert.match(greeting.toString(), /^220 .*Blue Pine Mail/);
+	assert.match(greeting.toString(), /^220 .*Blue Pine Solutions Mail/);
 	assert.doesNotMatch(greeting.toString(), /Mailflare/);
 });
 

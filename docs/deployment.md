@@ -1,12 +1,12 @@
 # Deployment and configuration
 
-This guide covers deploying Blue Pine Mail to Cloudflare Workers, runtime configuration, database migrations and backups, versions and updates, and source provenance. For a Docker or Node deployment on your own server, see [self-hosting](self-hosting.md).
+This guide covers deploying Blue Pine Solutions Mail to Cloudflare Workers, runtime configuration, database migrations and backups, versions and updates, and source provenance. For a Docker or Node deployment on your own server, see [self-hosting](self-hosting.md).
 
 ## Overview
 
 1. **Deploy the Worker** to your Cloudflare account, with the Worker named `mailflare` and a runtime `CF_TOKEN`.
 2. **Complete setup:** open the deployed app and follow `/setup` to check the installation and create the first admin account.
-3. **Connect your domain:** add a domain managed by the same Cloudflare account. Blue Pine Mail configures Email Routing and, when selected, Email Sending before helping you create the first mailbox.
+3. **Connect your domain:** add a domain managed by the same Cloudflare account. Blue Pine Solutions Mail configures Email Routing and, when selected, Email Sending before helping you create the first mailbox.
 
 The Worker name must stay `mailflare`. It is a compatibility name: `CF_EMAIL_WORKER_NAME`, the Worker `name` and `services[].service` for `WORKER_SELF_REFERENCE` in `wrangler.jsonc` must all agree, and Email Routing rules target it.
 
@@ -16,7 +16,7 @@ Before starting, create the `CF_TOKEN` described below.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/blue-pine-solutions/blue-pine-mail)
 
-The button deploys the `main` branch of the public Blue Pine Mail repository, which only holds published Blue Pine Mail source.
+The button deploys the `main` branch of the public Blue Pine Solutions Mail repository, which only holds published Blue Pine Solutions Mail source.
 
 1. Click **Deploy to Cloudflare** and sign in if prompted.
 2. Choose the Cloudflare account that owns the domain you want to use.
@@ -83,7 +83,7 @@ An agent with terminal access can run the manual deployment for you. Give it the
 The Worker and resource names below keep their upstream form for compatibility; do not rename them.
 
 ```text
-Install Blue Pine Mail from https://github.com/blue-pine-solutions/blue-pine-mail in my Cloudflare
+Install Blue Pine Solutions Mail from https://github.com/blue-pine-solutions/blue-pine-mail in my Cloudflare
 account, from the release tag or commit I name (default: the latest bluepine-v* release).
 Ask me for my Cloudflare account ID, a scoped deployment API token, and a separate
 runtime CF_TOKEN through a secret input. Never print, commit, or place either token
@@ -131,7 +131,7 @@ The assistant uses the Workers AI `AI` binding and a separate `mailflare-agent` 
 
 Three things identify what is running, and **Admin → Version and updates** and the **About** page show them:
 
-- **Blue Pine Mail version**: the distribution's own version.
+- **Blue Pine Solutions Mail version**: the distribution's own version.
 - **Mailflare base**: the upstream version this build is based on. It is not a Blue Pine version and is never offered as an update.
 - **Build commit**: the exact Blue Pine commit, when the deployment records `BLUEPINE_BUILD_COMMIT`.
 
@@ -146,7 +146,7 @@ If GitHub cannot be reached, the release source is private or no releases exist,
 
 ## Source and build provenance
 
-Blue Pine Mail is licensed under the GNU Affero General Public License v3.0 or later. The app offers its source to everyone who uses it:
+Blue Pine Solutions Mail is licensed under the GNU Affero General Public License v3.0 or later. The app offers its source to everyone who uses it:
 
 - `/about` shows the product, distributor, version, Mailflare base, build commit, license and the upstream attribution.
 - `/source` redirects to the source of the running build: `https://github.com/blue-pine-solutions/blue-pine-mail/tree/<commit>` when `BLUEPINE_BUILD_COMMIT` holds a valid commit SHA, otherwise the repository itself.

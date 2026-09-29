@@ -2,7 +2,7 @@
 
 ## Cloudflare error 9109: Invalid access token
 
-The Deploy to Cloudflare flow can deploy the Worker, but its deployment token is not exposed to Blue Pine Mail at runtime. Create a separate Cloudflare API token and set it as `CF_TOKEN`.
+The Deploy to Cloudflare flow can deploy the Worker, but its deployment token is not exposed to Blue Pine Solutions Mail at runtime. Create a separate Cloudflare API token and set it as `CF_TOKEN`.
 
 Verify the token:
 
@@ -26,7 +26,7 @@ Update the token so it can read the zone and manage its DNS, Email Routing setti
 
 ## Cloudflare error 2008 for existing MX records
 
-Cloudflare Email Routing cannot be enabled while another mail provider's MX records are present. Blue Pine Mail shows a confirmation before replacing them. Continuing deletes the existing MX records and points incoming mail to Cloudflare Email Routing, so the previous provider will stop receiving mail. The `CF_TOKEN` needs **DNS Edit** permission for this action.
+Cloudflare Email Routing cannot be enabled while another mail provider's MX records are present. Blue Pine Solutions Mail shows a confirmation before replacing them. Continuing deletes the existing MX records and points incoming mail to Cloudflare Email Routing, so the previous provider will stop receiving mail. The `CF_TOKEN` needs **DNS Edit** permission for this action.
 
 ## D1 error 7404: Database could not be found
 

@@ -16,7 +16,7 @@ export function SidebarHeader({ href, label }: SidebarHeaderProps) {
 	return (
 		<div className={`mb-3 flex h-10 items-center ${minimal ? "" : "gap-2 px-1"}`}>
 			{minimal ? <Tooltip label="Expand menu" placement="right">{toggleButton}</Tooltip> : toggleButton}
-			{!minimal && <Link href={href} className="flex min-w-0 items-center gap-3"><img src={branding.iconUrl} height={28} width={28} alt="" /><span className="truncate text-lg font-semibold text-neutral-800">{label ?? branding.appName}</span></Link>}
+			{!minimal && <Link href={href} className="flex min-w-0 items-center gap-3"><img src={branding.iconUrl} height={28} width={28} alt="" /><span className="line-clamp-2 text-base font-semibold leading-tight text-neutral-800">{label ?? branding.appName}</span></Link>}
 		</div>
 	);
 }

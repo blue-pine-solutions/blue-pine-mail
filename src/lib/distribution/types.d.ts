@@ -25,7 +25,7 @@ export type DistributionEnv = {
 	BLUEPINE_RELEASE_REPOSITORY?: string;
 };
 
-/** Where approved Blue Pine Mail releases are published (owner/repository on GitHub). */
+/** Where approved Blue Pine Solutions Mail releases are published (owner/repository on GitHub). */
 export type ReleaseSource = { owner: string; repository: string };
 
 export type ReleaseCheck =

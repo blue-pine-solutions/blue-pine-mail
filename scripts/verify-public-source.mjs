@@ -1,4 +1,4 @@
-// Release preflight: is this exact Blue Pine Mail commit published in the public
+// Release preflight: is this exact Blue Pine Solutions Mail commit published in the public
 // source repository? A build may only be offered to users once it is, because
 // /source sends them to <repository>/tree/<commit>.
 //

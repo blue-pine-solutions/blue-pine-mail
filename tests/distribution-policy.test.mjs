@@ -32,8 +32,8 @@ test.after(() => rmSync(bundleDirectory, { recursive: true, force: true }));
 const REPOSITORY = "https://github.com/blue-pine-solutions/blue-pine-mail";
 const ALL_ENABLED = { customBranding: true, multipleAccounts: true, sharedMailboxes: true, accountForwarding: true, gravatar: true };
 
-test("the distribution identity is Blue Pine Mail, derived from Mailflare", () => {
-	assert.equal(DISTRIBUTION.name, "Blue Pine Mail");
+test("the distribution identity is Blue Pine Solutions Mail, derived from Mailflare", () => {
+	assert.equal(DISTRIBUTION.name, "Blue Pine Solutions Mail");
 	assert.equal(DISTRIBUTION.vendor, "Blue Pine Solutions");
 	assert.equal(DISTRIBUTION.sourceRepository, REPOSITORY);
 	assert.equal(DISTRIBUTION.license, "AGPL-3.0-or-later");
