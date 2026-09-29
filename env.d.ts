@@ -25,9 +25,6 @@ interface CloudflareEnv {
 	CF_API_KEY?: string;
 	CF_EMAIL?: string;
 	TURNSTILE_SECRET_KEY?: string;
-	GITHUB_UPDATE_TOKEN?: string;
-	GITHUB_UPDATE_REF?: string;
-	GITHUB_UPDATE_REPO?: string;
 	/** "node" when served by the self-hosted runtime in server/; unset on Workers. */
 	MAILFLARE_RUNTIME?: "node";
 	/** Shared secret the Cloudflare email relay signs inbound webhooks with (self-hosted only). */

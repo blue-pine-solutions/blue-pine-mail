@@ -117,7 +117,7 @@ test("the Node SMTP greeting names Blue Pine Mail", async (t) => {
 	assert.doesNotMatch(greeting.toString(), /Mailflare/);
 });
 
-test("compatibility identifiers and Phase 6 update copy are deliberately unchanged", () => {
+test("compatibility identifiers are deliberately unchanged", () => {
 	assert.equal(app.MAILFLARE_FORWARDED_HEADER, "X-Mailflare-Forwarded");
 	assert.match(read("src/lib/jmap/handler.ts"), /realm="Mailflare JMAP"/);
 	assert.match(read("src/lib/mcp/server.ts"), /name: "mailflare"/);
@@ -126,6 +126,6 @@ test("compatibility identifiers and Phase 6 update copy are deliberately unchang
 	assert.match(read("src/components/compose/rich-text-utils.ts"), /data-mailflare-quote/);
 	assert.match(read("src/lib/auth/client.ts"), /"mailflare-session-token"/);
 	assert.match(read("src/db/schema/index.ts"), /default\("Mailflare"\)/);
-	assert.match(read("src/components/admin-update-card.tsx"), /Update Mailflare/, "update card is left for Phase 6");
+	assert.doesNotMatch(read("src/components/admin-update-card.tsx"), /Update Mailflare/, "the update card uses the Blue Pine release channel");
 	for (const [path] of REPLACED) assert.doesNotMatch(read(path), /paymug|getLicenseEntitlements/i, path);
 });

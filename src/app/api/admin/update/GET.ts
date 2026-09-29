@@ -1,15 +1,25 @@
 import { NextResponse } from "next/server";
-import { authorizeAdminRequest, getUpdateStatus } from "./utils";
+import { DISTRIBUTION, getBuildCommit } from "@/lib/distribution/identity";
+import { checkForRelease } from "@/lib/distribution/releases";
+import type { VersionStatus } from "./types";
+import { authorizeAdminRequest } from "./utils";
 
+/**
+ * The installed Blue Pine Mail version and whether a newer approved Blue Pine
+ * release has been published. Check only: nothing here installs or deploys.
+ */
 export async function GET(request: Request) {
 	const authorization = await authorizeAdminRequest(request);
 	if ("error" in authorization) return authorization.error;
 
-	try {
-		return NextResponse.json(await getUpdateStatus(authorization.env));
-	} catch (error) {
-		const message = error instanceof Error ? error.message : "Could not check for updates";
-		const status = message.includes("must be configured") ? 503 : 502;
-		return NextResponse.json({ error: message }, { status });
-	}
+	const status: VersionStatus = {
+		installed: {
+			name: DISTRIBUTION.name,
+			version: DISTRIBUTION.version,
+			buildCommit: getBuildCommit(),
+			upstream: { name: DISTRIBUTION.upstream.name, version: DISTRIBUTION.upstream.version },
+		},
+		release: await checkForRelease(),
+	};
+	return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
 }

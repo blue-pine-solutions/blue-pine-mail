@@ -118,9 +118,9 @@ Mailbox authorization is separate from user role and goes through `src/lib/mailb
 
 `getFeaturePolicy()` (`src/lib/distribution/features.ts`) decides whether custom branding, multiple accounts, shared mailboxes and account forwarding are available; `BLUEPINE_DISABLED_FEATURES` turns them off per deployment. It is availability only: routes still authenticate, check admin role and mailbox access as before. Upstream Mailflare's Paymug licensing (`src/lib/licenses/`) is removed from this distribution; the `license_settings` table stays in the schema and backups for compatibility and has no effect.
 
-### Self-update
+### Version and updates
 
-The admin overview dispatches `deploy-update.yml` (constant in `src/app/api/admin/update/utils.ts`) in the installation repo, which merges the upstream default branch and pushes it. It does not migrate, build, or deploy; the connected Cloudflare Git integration deploys the push. The admin update card separately reports and applies pending D1 migrations through the Worker binding.
+The admin "Version and updates" card (`/api/admin/update`, GET only) shows the installed Blue Pine Mail version and build, and checks for approved releases: published GitHub Releases tagged `bluepine-vMAJOR.MINOR.PATCH` in the Blue Pine repository (`src/lib/distribution/releases.ts`; `BLUEPINE_RELEASE_REPOSITORY` overrides it). It never installs or deploys anything and never looks at upstream Mailflare. Upstream's workflow that replaced the installation repository with upstream `main` has been removed. The same card reports and applies pending database migrations through `/api/admin/migrations`.
 
 ## Conventions
 

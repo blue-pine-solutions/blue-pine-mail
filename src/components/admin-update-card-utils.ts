@@ -1,25 +1,29 @@
-import type { MigrationStatusResponse, UpdateStatusResponse, UpdateWorkflowResponse } from "./admin-update-card-types";
+import type { ReleaseCheck } from "@/lib/distribution/types";
+import type { MigrationStatusResponse, VersionStatusResponse } from "./admin-update-card-types";
 
-export async function getApplicationUpdateStatus(): Promise<UpdateStatusResponse> {
+export async function getVersionStatus(): Promise<VersionStatusResponse> {
 	const response = await fetch("/api/admin/update", { cache: "no-store" });
-	const data = (await response.json()) as UpdateStatusResponse;
+	const data = (await response.json()) as VersionStatusResponse;
 
 	if (!response.ok) {
-		throw new Error(data.error ?? "Could not check for updates");
+		throw new Error(data.error ?? "Could not check the installed version");
 	}
 
 	return data;
 }
 
-export async function triggerApplicationUpdate(): Promise<UpdateWorkflowResponse> {
-	const response = await fetch("/api/admin/update", { method: "POST" });
-	const data = (await response.json()) as UpdateWorkflowResponse;
-
-	if (!response.ok) {
-		throw new Error(data.error ?? "Could not start the update");
+/** One line describing the release channel result; installing a release happens outside the app. */
+export function describeRelease(release: ReleaseCheck, productName: string): string {
+	switch (release.state) {
+		case "update-available":
+			return `${productName} ${release.latest} is available. Deploy it with the method used for this installation.`;
+		case "up-to-date":
+			return `No newer ${productName} release is available.`;
+		case "no-releases":
+			return `No ${productName} releases have been published yet.`;
+		case "unavailable":
+			return `Could not check for ${productName} releases: ${release.reason}.`;
 	}
-
-	return data;
 }
 
 export async function getMigrationStatus(): Promise<MigrationStatusResponse> {

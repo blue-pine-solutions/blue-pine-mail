@@ -1,39 +1,30 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CheckCircle2, CircleX, Database, RefreshCw } from "lucide-react";
+import { CheckCircle2, CircleX, Database, PackageCheck, RefreshCw } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-	applyDatabaseMigrations,
-	getApplicationUpdateStatus,
-	getMigrationStatus,
-	triggerApplicationUpdate,
-} from "./admin-update-card-utils";
-import type { MigrationStatusResponse, UpdateStatusResponse, UpdateWorkflowResponse } from "./admin-update-card-types";
+import { applyDatabaseMigrations, describeRelease, getMigrationStatus, getVersionStatus } from "./admin-update-card-utils";
+import type { MigrationStatusResponse, VersionStatusResponse } from "./admin-update-card-types";
 
 export function AdminUpdateCard() {
-	const [status, setStatus] = useState<UpdateStatusResponse>();
-	const [result, setResult] = useState<UpdateWorkflowResponse>();
+	const [status, setStatus] = useState<VersionStatusResponse>();
 	const [error, setError] = useState("");
 	const [migrationError, setMigrationError] = useState("");
 	const [migrationStatus, setMigrationStatus] = useState<MigrationStatusResponse>();
 	const [isChecking, setIsChecking] = useState(true);
 	const [isCheckingMigrations, setIsCheckingMigrations] = useState(true);
-	const [isPending, setIsPending] = useState(false);
 	const [isMigrating, setIsMigrating] = useState(false);
 
 	useEffect(() => {
 		let isActive = true;
 
-		getApplicationUpdateStatus()
-			.then((updateStatus) => {
-				if (isActive) setStatus(updateStatus);
+		getVersionStatus()
+			.then((versionStatus) => {
+				if (isActive) setStatus(versionStatus);
 			})
 			.catch((statusError) => {
-				if (isActive) {
-					setError(statusError instanceof Error ? statusError.message : "Could not check for updates");
-				}
+				if (isActive) setError(statusError instanceof Error ? statusError.message : "Could not check the installed version");
 			})
 			.finally(() => {
 				if (isActive) setIsChecking(false);
@@ -57,20 +48,6 @@ export function AdminUpdateCard() {
 		};
 	}, []);
 
-	async function handleUpdate() {
-		setError("");
-		setResult(undefined);
-		setIsPending(true);
-
-		try {
-			setResult(await triggerApplicationUpdate());
-		} catch (updateError) {
-			setError(updateError instanceof Error ? updateError.message : "Could not start the update");
-		} finally {
-			setIsPending(false);
-		}
-	}
-
 	async function handleMigrate() {
 		setMigrationError("");
 		setIsMigrating(true);
@@ -85,6 +62,9 @@ export function AdminUpdateCard() {
 		}
 	}
 
+	const installed = status?.installed;
+	const release = status?.release;
+
 	return (
 		<Card className="rounded-3xl border-0 bg-white p-6">
 			<CardHeader className="flex-row items-center gap-4 space-y-0 py-0">
@@ -92,104 +72,84 @@ export function AdminUpdateCard() {
 					<RefreshCw className="h-5 w-5" />
 				</div>
 				<div>
-					<CardTitle className="text-base">Application update</CardTitle>
+					<CardTitle className="text-base">Version and updates</CardTitle>
 					<p className="mt-1 text-sm text-neutral-500">
-						Sync the latest Mailflare release and keep its database schema up to date.
+						The installed version, approved releases and database migrations. Releases are installed by deploying them, not from this page.
 					</p>
 				</div>
 			</CardHeader>
 			<CardContent className="space-y-5 pt-5">
 				{isChecking && <Skeleton className="h-20 w-full rounded-2xl" />}
 
-				{!isChecking && status?.configured === false && (
-					<div className="space-y-3">
-						<p className="text-sm text-neutral-600">Complete the required Cloudflare Worker configuration:</p>
-						<ul className="divide-y divide-neutral-100 overflow-hidden rounded-2xl border border-neutral-100">
-							{status.configuration?.map((item) => (
-								<li key={item.name} className="flex items-center gap-3 px-4 py-3 text-sm">
-									{item.configured ? (
-										<CheckCircle2 className="h-4 w-4 shrink-0 text-green-600" />
-									) : (
-										<CircleX className="h-4 w-4 shrink-0 text-red-600" />
-									)}
-									<code className="text-xs font-medium text-neutral-800">{item.name}</code>
-									<span className={`ml-auto text-xs font-medium ${item.configured ? "text-green-700" : "text-red-600"}`}>
-										{item.configured ? "Configured" : "Missing"}
-									</span>
-								</li>
-							))}
-						</ul>
-					</div>
-				)}
-
-				{!isChecking && status?.configured && (
+				{!isChecking && installed && release && (
 					<div className="divide-y divide-neutral-100 overflow-hidden rounded-2xl border border-neutral-100">
-						<div className="flex items-center gap-3 px-4 py-4">
-							{status.available ? (
-								<RefreshCw className={`h-4 w-4 shrink-0 text-blue-600 ${isPending ? "animate-spin" : ""}`} />
+						<div className="flex items-start gap-3 px-4 py-4">
+							<PackageCheck className="mt-0.5 h-4 w-4 shrink-0 text-neutral-500" />
+							<div className="min-w-0 text-sm text-neutral-700">
+								<p>{installed.name} {installed.version}</p>
+								<p className="text-xs text-neutral-500">
+									Build {installed.buildCommit ? <code>{installed.buildCommit.slice(0, 12)}</code> : "not recorded"} · based on {installed.upstream.name} {installed.upstream.version}
+								</p>
+							</div>
+						</div>
+						<div className="flex items-start gap-3 px-4 py-4">
+							{release.state === "update-available" ? (
+								<RefreshCw className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
+							) : release.state === "unavailable" ? (
+								<CircleX className="mt-0.5 h-4 w-4 shrink-0 text-neutral-400" />
 							) : (
-								<CheckCircle2 className="h-4 w-4 shrink-0 text-green-600" />
+								<CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-green-600" />
 							)}
-							<p className="min-w-0 text-sm text-neutral-700">
-								{status.available
-									? `Mailflare v${status.targetVersion} is available. You are using v${status.currentVersion}.`
-									: `Mailflare v${status.currentVersion} is up to date.`}
-							</p>
-							{status.available && (
-								<button
-									type="button"
-									onClick={handleUpdate}
-									disabled={isPending}
-									className="ml-auto shrink-0 text-sm font-medium text-blue-700 hover:underline disabled:pointer-events-none disabled:opacity-50"
-								>
-									{isPending ? "Starting update..." : "Update Mailflare"}
-								</button>
+							<p className="min-w-0 text-sm text-neutral-700">{describeRelease(release, installed.name)}</p>
+							{(release.state === "update-available" || release.state === "up-to-date") && (
+								<a className="ml-auto shrink-0 text-sm font-medium text-blue-700 hover:underline" href={release.releaseUrl} target="_blank" rel="noreferrer">
+									Release notes
+								</a>
 							)}
 						</div>
-
-						{isCheckingMigrations && (
-							<div className="flex items-center gap-3 px-4 py-4">
-								<Skeleton className="h-4 w-4 rounded-full" />
-								<Skeleton className="h-4 w-44" />
-							</div>
-						)}
-
-						{!isCheckingMigrations && !!migrationStatus?.pending.length && !migrationStatus.unknown.length && (
-							<div className="flex items-center gap-3 px-4 py-4">
-								<Database className={`h-4 w-4 shrink-0 text-amber-600 ${isMigrating ? "animate-pulse" : ""}`} />
-								<p className="text-sm text-neutral-700">
-									{migrationStatus.pending.length} database {migrationStatus.pending.length === 1 ? "migration is" : "migrations are"} pending.
-								</p>
-								<button
-									type="button"
-									onClick={handleMigrate}
-									disabled={isMigrating}
-									className="ml-auto shrink-0 text-sm font-medium text-blue-700 hover:underline disabled:pointer-events-none disabled:opacity-50"
-								>
-									{isMigrating ? "Updating database..." : "Update database"}
-								</button>
-							</div>
-						)}
-
-						{!isCheckingMigrations && !!migrationStatus?.unknown.length && (
-							<div className="flex items-center gap-3 px-4 py-4 text-sm text-red-600">
-								<CircleX className="h-4 w-4 shrink-0" />
-								Deploy the matching Mailflare release before changing this database.
-							</div>
-						)}
 					</div>
 				)}
 
-				{result?.ok && (
-					<p className="text-sm text-green-700">
-						Update started for {result.repository}@{result.ref}. Refresh this page after Cloudflare deploys it. {" "}
-						{result.runUrl && (
-							<a className="font-medium underline" href={result.runUrl} target="_blank" rel="noreferrer">
-								View workflow
-							</a>
-						)}
-					</p>
-				)}
+				<div className="divide-y divide-neutral-100 overflow-hidden rounded-2xl border border-neutral-100">
+					{isCheckingMigrations && (
+						<div className="flex items-center gap-3 px-4 py-4">
+							<Skeleton className="h-4 w-4 rounded-full" />
+							<Skeleton className="h-4 w-44" />
+						</div>
+					)}
+
+					{!isCheckingMigrations && migrationStatus?.ready && (
+						<div className="flex items-center gap-3 px-4 py-4">
+							<Database className="h-4 w-4 shrink-0 text-green-600" />
+							<p className="text-sm text-neutral-700">The database is up to date for this build.</p>
+						</div>
+					)}
+
+					{!isCheckingMigrations && !!migrationStatus?.pending.length && !migrationStatus.unknown.length && (
+						<div className="flex items-center gap-3 px-4 py-4">
+							<Database className={`h-4 w-4 shrink-0 text-amber-600 ${isMigrating ? "animate-pulse" : ""}`} />
+							<p className="text-sm text-neutral-700">
+								{migrationStatus.pending.length} database {migrationStatus.pending.length === 1 ? "migration is" : "migrations are"} pending.
+							</p>
+							<button
+								type="button"
+								onClick={handleMigrate}
+								disabled={isMigrating}
+								className="ml-auto shrink-0 text-sm font-medium text-blue-700 hover:underline disabled:pointer-events-none disabled:opacity-50"
+							>
+								{isMigrating ? "Updating database..." : "Update database"}
+							</button>
+						</div>
+					)}
+
+					{!isCheckingMigrations && !!migrationStatus?.unknown.length && (
+						<div className="flex items-center gap-3 px-4 py-4 text-sm text-red-600">
+							<CircleX className="h-4 w-4 shrink-0" />
+							This database has migrations this build does not include. Deploy the matching {installed?.name ?? "Blue Pine Mail"} release before changing it.
+						</div>
+					)}
+				</div>
+
 				{error && <p className="text-sm text-red-600">{error}</p>}
 				{migrationError && <p className="text-sm text-red-600">{migrationError}</p>}
 			</CardContent>

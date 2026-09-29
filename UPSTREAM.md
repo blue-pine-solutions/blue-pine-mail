@@ -81,6 +81,10 @@ These identifiers contain "mailflare" but carry data, protocol or deployment com
 
 Browser storage keys and window event names prefixed `mailflare` are not compatibility contracts in the same sense, but renaming them resets user preferences for no benefit. Leave them.
 
+## Customer releases
+
+Upstream Mailflare is an engineering input, never a customer update channel. Installations only learn about approved Blue Pine Mail releases: published (non-draft, non-prerelease) GitHub Releases tagged `bluepine-vMAJOR.MINOR.PATCH` in the Blue Pine repository, compared against `DISTRIBUTION.version`. The app checks for them but never installs or deploys; a release is rolled out with the installation's deployment method. Publish a release only for a commit that has passed the integration checks below.
+
 ## Integration process
 
 1. Work on a dedicated branch: `integrate/upstream-<YYYY-MM-DD>` from Blue Pine `main`.

@@ -38,15 +38,6 @@
       "CF_EMAIL_WORKER_NAME": {
         "description": "Worker name used when creating Cloudflare Email Routing rules. Set this to the deployed Worker name; if you rename the Worker, update this value too."
       },
-      "GITHUB_UPDATE_TOKEN": {
-        "description": "Fine-grained GitHub token for the installation repository with Actions: write permission. Used by the admin update endpoint to dispatch deploy-update.yml."
-      },
-      "GITHUB_UPDATE_REF": {
-        "description": "Optional branch used to dispatch updates. Leave blank to use the repository default branch."
-      },
-      "GITHUB_UPDATE_REPO": {
-        "description": "Your github repository that connect to cloudflare worker"
-      },
       "CF_EMAIL": {
         "description": "Legacy Global API Key auth only. Use this with `CF_API_KEY` instead of `CF_TOKEN`."
       },

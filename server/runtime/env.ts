@@ -60,9 +60,6 @@ export function createNodeRuntime(): NodeRuntime {
 		CF_API_KEY: optional("CF_API_KEY"),
 		CF_EMAIL: optional("CF_EMAIL"),
 		TURNSTILE_SECRET_KEY: optional("TURNSTILE_SECRET_KEY"),
-		GITHUB_UPDATE_TOKEN: optional("GITHUB_UPDATE_TOKEN"),
-		GITHUB_UPDATE_REF: optional("GITHUB_UPDATE_REF"),
-		GITHUB_UPDATE_REPO: optional("GITHUB_UPDATE_REPO"),
 		// Marks the runtime for the few places that must behave differently.
 		MAILFLARE_RUNTIME: "node",
 		APP_URL: optional("APP_URL")?.replace(/\/$/, ""),

@@ -28,7 +28,7 @@ export async function getMigrationStatus(db: D1Database): Promise<MigrationStatu
 export async function applyPendingMigrations(db: D1Database): Promise<MigrationResult> {
 	const initial = await getMigrationStatus(db);
 	if (initial.unknown.length > 0) {
-		throw new Error("The database contains migrations that are not part of this Mailflare release.");
+		throw new Error("The database contains migrations that are not part of this build.");
 	}
 
 	await db.prepare(MIGRATION_TABLE_SQL).run();
