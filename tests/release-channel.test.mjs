@@ -97,19 +97,19 @@ test("drafts, prereleases, upstream tags and response-supplied URLs are ignored"
 });
 
 test("checkForRelease compares Blue Pine versions and asks only the Blue Pine repository", async () => {
-	assert.equal(app.DISTRIBUTION.version, "0.1.1");
-	const newer = fakeGitHub(() => json([release("bluepine-v0.1.2"), release("v0.5.0")]));
+	assert.equal(app.DISTRIBUTION.version, "0.1.2");
+	const newer = fakeGitHub(() => json([release("bluepine-v0.1.3"), release("v0.5.0")]));
 	const result = await app.checkForRelease({ env: {}, fetch: newer.fetch });
-	assert.deepEqual(result, { state: "update-available", installed: "0.1.1", latest: "0.1.2", tag: "bluepine-v0.1.2", releaseUrl: "https://github.com/blue-pine-solutions/blue-pine-mail/releases/tag/bluepine-v0.1.2", source: "blue-pine-solutions/blue-pine-mail" });
+	assert.deepEqual(result, { state: "update-available", installed: "0.1.2", latest: "0.1.3", tag: "bluepine-v0.1.3", releaseUrl: "https://github.com/blue-pine-solutions/blue-pine-mail/releases/tag/bluepine-v0.1.3", source: "blue-pine-solutions/blue-pine-mail" });
 	assert.equal(newer.calls.length, 1);
 	assert.equal(newer.calls[0].url, "https://api.github.com/repos/blue-pine-solutions/blue-pine-mail/releases?per_page=30");
 	assert.ok(newer.calls[0].init.signal, "requests carry a timeout");
 	assert.equal(newer.calls[0].init.headers.Authorization, undefined, "no credentials are sent");
 
-	assert.equal((await app.checkForRelease({ env: {}, fetch: fakeGitHub(() => json([release("bluepine-v0.1.1"), release("bluepine-v0.1.0")])).fetch })).state, "up-to-date");
+	assert.equal((await app.checkForRelease({ env: {}, fetch: fakeGitHub(() => json([release("bluepine-v0.1.2"), release("bluepine-v0.1.1"), release("bluepine-v0.1.0")])).fetch })).state, "up-to-date");
 	// Upstream's version number (0.4.0 here) is not a Blue Pine release and is never offered.
 	const upstreamOnly = await app.checkForRelease({ env: {}, fetch: fakeGitHub(() => json([release("v0.4.0"), release("v0.5.0")])).fetch });
-	assert.deepEqual(upstreamOnly, { state: "no-releases", installed: "0.1.1", source: "blue-pine-solutions/blue-pine-mail" });
+	assert.deepEqual(upstreamOnly, { state: "no-releases", installed: "0.1.2", source: "blue-pine-solutions/blue-pine-mail" });
 	assert.equal((await app.checkForRelease({ env: {}, fetch: fakeGitHub(() => json([])).fetch })).state, "no-releases");
 });
 
@@ -126,7 +126,7 @@ test("checkForRelease fails gracefully and never throws", async () => {
 	for (const [label, respond] of cases) {
 		const result = await app.checkForRelease({ env: {}, fetch: fakeGitHub(respond).fetch });
 		assert.equal(result.state, "unavailable", label);
-		assert.equal(result.installed, "0.1.1", label);
+		assert.equal(result.installed, "0.1.2", label);
 		assert.ok(result.reason.length > 0, label);
 	}
 	assert.equal((await app.checkForRelease({ env: { BLUEPINE_RELEASE_REPOSITORY: "bad value" }, fetch: () => { throw new Error("must not be called"); } })).state, "unavailable");
@@ -170,7 +170,7 @@ test("the update API is admin-only, check-only, and reports Blue Pine and upstre
 	const response = await call(app.updateRoute.GET, adminToken);
 	assert.equal(response.status, 200);
 	const body = await response.json();
-	assert.deepEqual(body.installed, { name: "Blue Pine Solutions Mail", version: "0.1.1", buildCommit: null, upstream: { name: "Mailflare", version: JSON.parse(read("package.json")).version } });
+	assert.deepEqual(body.installed, { name: "Blue Pine Solutions Mail", version: "0.1.2", buildCommit: null, upstream: { name: "Mailflare", version: JSON.parse(read("package.json")).version } });
 	assert.equal(body.release.state, "update-available");
 	assert.equal(body.release.latest, "0.2.0");
 
