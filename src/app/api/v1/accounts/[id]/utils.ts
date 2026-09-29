@@ -6,7 +6,6 @@ import { users } from "@/db/schema";
 import { authenticateAdminApiKey } from "@/lib/api/admin-auth";
 import { FEATURE_DISABLED_MESSAGES, getFeaturePolicy } from "@/lib/distribution/features";
 import { updateManagedAccountSchema } from "@/lib/validators";
-import { getLicenseEntitlements } from "@/lib/licenses/service";
 import { selectAccountById, updateAccountCredentials } from "@/app/api/accounts/[id]/utils";
 import { deleteUserSessions } from "@/lib/auth/session";
 import type { AdminAccountRouteParams } from "./types";
@@ -37,8 +36,8 @@ export async function PATCH(request: Request, { params }: AdminAccountRouteParam
 	if (!account || (account.id !== auth.userId && account.createdByUserId !== auth.userId)) return NextResponse.json({ error: "Account not found" }, { status: 404 });
 	const parsed = updateManagedAccountSchema.safeParse(await request.json().catch(() => null));
 	if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
-	const canForwardEmail = (await getLicenseEntitlements(env)).canForwardEmail;
-	if (!canForwardEmail && parsed.data.forwardingEmail && parsed.data.forwardingEmail !== account.forwardingEmail) return NextResponse.json({ error: "A Pro or Team license is required for email forwarding" }, { status: 403 });
+	const canForwardEmail = getFeaturePolicy().accountForwarding;
+	if (!canForwardEmail && parsed.data.forwardingEmail && parsed.data.forwardingEmail !== account.forwardingEmail) return NextResponse.json({ error: FEATURE_DISABLED_MESSAGES.accountForwarding }, { status: 403 });
 	await updateAccountCredentials(db, id, { name: parsed.data.name, password: parsed.data.password ?? null });
 	if (parsed.data.password) await deleteUserSessions(env, id);
 	await db.update(users).set({

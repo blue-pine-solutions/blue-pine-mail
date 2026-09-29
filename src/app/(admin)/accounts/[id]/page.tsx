@@ -100,6 +100,7 @@ export default function AccountDetailsPage() {
 						Incoming mail will also be sent to this verified Cloudflare Email Routing destination.
 					</p>
 				</div>}
+				{!account.canForwardEmail && <p className="text-xs leading-5 text-neutral-500">Email forwarding is turned off for this deployment.</p>}
 				<div className="space-y-2">
 					<Label htmlFor="account-new-password">Reset password (optional)</Label>
 					<Input

@@ -93,3 +93,21 @@ test("account management and shared mailboxes follow Blue Pine policy, not upstr
 	assert.match(read("src/app/api/accounts/utils.ts"), /assertAdmin\(user\);\s+if \(!getFeaturePolicy\(\)\[feature\]\)/, "the admin check must run before the feature check");
 	assert.match(read("src/lib/mailboxes/access.ts"), /if \(isOwner\) return buildAccess[\s\S]*mailbox\.type !== "shared" \|\| !isMailboxSharingEnabled\(\)[\s\S]*eq\(mailboxAccess\.userId, user\.id\)/, "shared access must still require the user's own mailbox_access row");
 });
+
+test("forwarding follows Blue Pine policy and keeps the X-Mailflare-Forwarded loop guard", () => {
+	for (const path of [
+		"src/lib/email/account-forwarding.ts",
+		"src/app/api/settings/forwarding/route.ts",
+		"src/app/api/settings/profile/route.ts",
+		"src/app/api/auth/me/route.ts",
+		"src/app/api/accounts/[id]/route.ts",
+		"src/app/api/v1/accounts/[id]/utils.ts",
+	]) {
+		const source = read(path);
+		assert.doesNotMatch(source, /getLicenseEntitlements|@\/lib\/licenses|Pro or Team/, `${path} must not use upstream license entitlements`);
+		assert.match(source, /getFeaturePolicy\(\)\.accountForwarding/, `${path} must use the accountForwarding policy`);
+	}
+	assert.match(read("src/lib/email/account-forwarding.ts"), /export const MAILFLARE_FORWARDED_HEADER = "X-Mailflare-Forwarded";/);
+	assert.match(read("src/lib/email/intake.ts"), /alreadyForwarded[\s\S]*MAILFLARE_FORWARDED_HEADER[\s\S]*if \(!alreadyForwarded\)/);
+	assert.match(read("worker.ts"), /message\.headers\.get\(MAILFLARE_FORWARDED_HEADER\) !== "1"/);
+});

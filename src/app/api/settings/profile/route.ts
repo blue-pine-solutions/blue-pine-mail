@@ -5,7 +5,7 @@ import { getEnv } from "@/lib/cloudflare";
 import { getDb } from "@/db";
 import { users } from "@/db/schema";
 import { requireUser } from "@/lib/auth/cookies";
-import { getLicenseEntitlements } from "@/lib/licenses/service";
+import { FEATURE_DISABLED_MESSAGES, getFeaturePolicy } from "@/lib/distribution/features";
 import { syncPersonalIdentity } from "@/lib/profile/sync";
 import type { UpdateProfileInput } from "./types";
 import { parseUpdateProfileRequest } from "./utils";
@@ -24,9 +24,9 @@ export async function PATCH(request: Request) {
 	}
 
 	const db = getDb(env);
-	const canForwardEmail = (await getLicenseEntitlements(env)).canForwardEmail;
+	const canForwardEmail = getFeaturePolicy().accountForwarding;
 	if (!canForwardEmail && parsed.forwardingEmail && parsed.forwardingEmail !== user.forwardingEmail) {
-		return NextResponse.json({ error: "A Pro or Team license is required for email forwarding" }, { status: 403 });
+		return NextResponse.json({ error: FEATURE_DISABLED_MESSAGES.accountForwarding }, { status: 403 });
 	}
 	const forwardingEmail = parsed.forwardingEmail === undefined ? user.forwardingEmail : parsed.forwardingEmail;
 	await syncPersonalIdentity(db, {

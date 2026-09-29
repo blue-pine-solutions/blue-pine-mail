@@ -60,15 +60,13 @@ export function AccountSettings() {
 						email={user.email}
 					/>
 
-					{user.canForwardEmail && (
-						<div className="space-y-4 rounded-lg bg-white p-6">
-							<div>
-								<h3 className="text-lg font-semibold text-neutral-900">Forwarding email</h3>
-								<p className="mt-1 text-sm text-neutral-500">Send a copy of incoming messages to another email address.</p>
-							</div>
-						<ForwardingEmailForm initialForwardingEmail={user.forwardingEmail ?? ""} />
+					<div className="space-y-4 rounded-lg bg-white p-6">
+						<div>
+							<h3 className="text-lg font-semibold text-neutral-900">Forwarding email</h3>
+							<p className="mt-1 text-sm text-neutral-500">{user.canForwardEmail ? "Send a copy of incoming messages to another email address." : "Email forwarding is turned off for this deployment."}</p>
 						</div>
-					)}
+						{user.canForwardEmail && <ForwardingEmailForm initialForwardingEmail={user.forwardingEmail ?? ""} />}
+					</div>
 
 					<div className="space-y-4 rounded-b-3xl rounded-t-lg bg-white p-6">
 						<div>
