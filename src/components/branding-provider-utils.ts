@@ -14,6 +14,15 @@ export const DEFAULT_BRANDING: Branding = {
 	canCustomizeBranding: true,
 };
 
+/**
+ * The document title to show for an app name. Only the application-level default title (exactly the
+ * distribution name, set by the root layout metadata) takes the configured app name; route-specific
+ * titles such as "Inbox (3)" or "About Blue Pine Solutions Mail" are left alone.
+ */
+export function brandedTitle(title: string, appName: string): string {
+	return title === DEFAULT_APP_NAME ? appName : title;
+}
+
 export async function fetchBranding(): Promise<Branding> {
 	const response = await fetch("/api/branding", { cache: "no-store" });
 	if (!response.ok) return DEFAULT_BRANDING;

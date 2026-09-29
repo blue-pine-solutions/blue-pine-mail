@@ -64,7 +64,8 @@ export function showBrowserNewMessageNotification(event: NewMessageEvent): void 
 	try {
 		const notification = new Notification(event.subject || "New email", {
 			body: `From ${event.fromName ?? event.from}`,
-			icon: "/icon-96.png",
+			// The branding route serves the custom icon when one is configured, otherwise the packaged app mark.
+			icon: "/api/branding/icon",
 			tag: event.messageId,
 		});
 		notification.onclick = () => {
