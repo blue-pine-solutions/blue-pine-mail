@@ -44,7 +44,7 @@ const app = await import(pathToFileURL(join(bundleDirectory, "entry.mjs")).href)
 test.after(() => rmSync(bundleDirectory, { recursive: true, force: true }));
 
 const release = (tag, extra = {}) => ({ tag_name: tag, draft: false, prerelease: false, html_url: "https://evil.example/phish", ...extra });
-const SOURCE = { owner: "bofa-ds", repository: "mailflare" };
+const SOURCE = { owner: "blue-pine-solutions", repository: "blue-pine-mail" };
 
 /** A stand-in for GitHub that records what was asked. */
 function fakeGitHub(respond) {
@@ -92,7 +92,7 @@ test("drafts, prereleases, upstream tags and response-supplied URLs are ignored"
 		null,
 	], SOURCE);
 	assert.deepEqual(approved.map((row) => row.version), ["0.3.0", "0.1.2"]);
-	assert.equal(approved[0].releaseUrl, "https://github.com/bofa-ds/mailflare/releases/tag/bluepine-v0.3.0");
+	assert.equal(approved[0].releaseUrl, "https://github.com/blue-pine-solutions/blue-pine-mail/releases/tag/bluepine-v0.3.0");
 	assert.deepEqual(app.selectApprovedReleases({ message: "not a list" }, SOURCE), []);
 });
 
@@ -100,16 +100,16 @@ test("checkForRelease compares Blue Pine versions and asks only the Blue Pine re
 	assert.equal(app.DISTRIBUTION.version, "0.1.0");
 	const newer = fakeGitHub(() => json([release("bluepine-v0.1.1"), release("v0.5.0")]));
 	const result = await app.checkForRelease({ env: {}, fetch: newer.fetch });
-	assert.deepEqual(result, { state: "update-available", installed: "0.1.0", latest: "0.1.1", tag: "bluepine-v0.1.1", releaseUrl: "https://github.com/bofa-ds/mailflare/releases/tag/bluepine-v0.1.1", source: "bofa-ds/mailflare" });
+	assert.deepEqual(result, { state: "update-available", installed: "0.1.0", latest: "0.1.1", tag: "bluepine-v0.1.1", releaseUrl: "https://github.com/blue-pine-solutions/blue-pine-mail/releases/tag/bluepine-v0.1.1", source: "blue-pine-solutions/blue-pine-mail" });
 	assert.equal(newer.calls.length, 1);
-	assert.equal(newer.calls[0].url, "https://api.github.com/repos/bofa-ds/mailflare/releases?per_page=30");
+	assert.equal(newer.calls[0].url, "https://api.github.com/repos/blue-pine-solutions/blue-pine-mail/releases?per_page=30");
 	assert.ok(newer.calls[0].init.signal, "requests carry a timeout");
 	assert.equal(newer.calls[0].init.headers.Authorization, undefined, "no credentials are sent");
 
 	assert.equal((await app.checkForRelease({ env: {}, fetch: fakeGitHub(() => json([release("bluepine-v0.1.0")])).fetch })).state, "up-to-date");
 	// Upstream's version number (0.4.0 here) is not a Blue Pine release and is never offered.
 	const upstreamOnly = await app.checkForRelease({ env: {}, fetch: fakeGitHub(() => json([release("v0.4.0"), release("v0.5.0")])).fetch });
-	assert.deepEqual(upstreamOnly, { state: "no-releases", installed: "0.1.0", source: "bofa-ds/mailflare" });
+	assert.deepEqual(upstreamOnly, { state: "no-releases", installed: "0.1.0", source: "blue-pine-solutions/blue-pine-mail" });
 	assert.equal((await app.checkForRelease({ env: {}, fetch: fakeGitHub(() => json([])).fetch })).state, "no-releases");
 });
 
@@ -190,8 +190,8 @@ test("the update UI is Blue Pine's, startup never checks releases, and other ide
 	for (const path of ["server/index.ts", "worker.ts", "src/app/layout.tsx", "src/lib/email/intake.ts"]) {
 		assert.doesNotMatch(read(path), /distribution\/releases|checkForRelease/, `${path} must not check releases`);
 	}
-	assert.equal(app.getSourceUrl(null), "https://github.com/bofa-ds/mailflare", "/source still serves the running build, not the latest release");
-	assert.equal(app.getSourceUrl("abcdef1"), "https://github.com/bofa-ds/mailflare/tree/abcdef1");
+	assert.equal(app.getSourceUrl(null), "https://github.com/blue-pine-solutions/blue-pine-mail", "/source still serves the running build, not the latest release");
+	assert.equal(app.getSourceUrl("abcdef1"), "https://github.com/blue-pine-solutions/blue-pine-mail/tree/abcdef1");
 	assert.equal(app.MAILFLARE_FORWARDED_HEADER, "X-Mailflare-Forwarded");
 	for (const path of ["src/lib/distribution/releases.ts", "src/app/api/admin/update/GET.ts", "src/components/admin-update-card.tsx"]) {
 		assert.doesNotMatch(read(path), /paymug|getLicenseEntitlements/i, path);

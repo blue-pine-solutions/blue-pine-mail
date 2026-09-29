@@ -5,7 +5,7 @@ Cloudflare Workers is Blue Pine Mail's primary deployment target (see [deploymen
 ## Quick start
 
 ```bash
-git clone https://github.com/bofa-ds/mailflare && cd mailflare
+git clone https://github.com/blue-pine-solutions/blue-pine-mail && cd blue-pine-mail
 cp .env.docker.example .env.docker      # edit: how to receive and send mail
 docker compose build --build-arg BLUEPINE_BUILD_COMMIT=$(git rev-parse HEAD)
 docker compose up -d

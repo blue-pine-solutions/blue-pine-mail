@@ -40,8 +40,8 @@ Downstream changes in this repository to date:
 - The documentation describes the Blue Pine Mail distribution; upstream
   sponsorship, pricing and promotional material has been removed.
 
-The git history of https://github.com/bofa-ds/mailflare identifies each
-change individually.
+The git history of https://github.com/blue-pine-solutions/blue-pine-mail
+identifies each change individually.
 
 License
 -------
@@ -53,7 +53,7 @@ provided without warranty, as described in LICENSE.
 Corresponding Source
 --------------------
 The Corresponding Source for Blue Pine Mail is available at:
-https://github.com/bofa-ds/mailflare
+https://github.com/blue-pine-solutions/blue-pine-mail
 
 A running installation offers its source from the "Source" link in the
 application (the /source address). When the build records its commit

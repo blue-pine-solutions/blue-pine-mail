@@ -29,7 +29,7 @@ await build({
 const { DISTRIBUTION, getBuildCommit, getSourceUrl, FEATURE_POLICY_KEYS, getFeaturePolicy } = await import(pathToFileURL(join(bundleDirectory, "entry.mjs")).href);
 test.after(() => rmSync(bundleDirectory, { recursive: true, force: true }));
 
-const REPOSITORY = "https://github.com/bofa-ds/mailflare";
+const REPOSITORY = "https://github.com/blue-pine-solutions/blue-pine-mail";
 const ALL_ENABLED = { customBranding: true, multipleAccounts: true, sharedMailboxes: true, accountForwarding: true, gravatar: true };
 
 test("the distribution identity is Blue Pine Mail, derived from Mailflare", () => {

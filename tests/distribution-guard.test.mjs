@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -7,7 +7,7 @@ import test from "node:test";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path) => readFileSync(join(root, path), "utf8");
 
-const BLUE_PINE_REPOSITORY = "https://github.com/bofa-ds/mailflare";
+const BLUE_PINE_REPOSITORY = "https://github.com/blue-pine-solutions/blue-pine-mail";
 const UPSTREAM_REPOSITORY = "https://github.com/hieunc229/mailflare";
 
 test("LICENSE keeps the upstream Mailflare copyright notice", () => {
@@ -147,6 +147,36 @@ test("documentation no longer describes the removed licensing layer or upstream 
 	}
 	assert.ok(!existsSync(join(root, ".github/FUNDING.yml")), "upstream funding metadata is not republished by the downstream repository");
 	assert.ok(!existsSync(join(root, ".github/workflows/deploy-update.yml")));
+});
+
+const SHIPPED_ROOTS = ["src", "server", "scripts", "docs", "deploy", "public", "worker.ts", "README.md", "NOTICE", "UPSTREAM.md", "CLAUDE.md", "package.json", "Dockerfile", "wrangler.jsonc.example", ".dev.vars.example", ".env.docker.example"];
+
+function shippedTextFiles() {
+	const files = [];
+	const visit = (path) => {
+		const full = join(root, path);
+		if (!existsSync(full)) return;
+		if (statSync(full).isDirectory()) {
+			for (const name of readdirSync(full)) visit(`${path}/${name}`);
+		} else if (!/\.(png|jpe?g|gif|ico|webp|woff2?|mp4|wav)$/i.test(path)) {
+			files.push(path);
+		}
+	};
+	for (const path of SHIPPED_ROOTS) visit(path);
+	return files;
+}
+
+test("source, release and deployment links name the public Blue Pine repository, not the legacy fork or the private one", () => {
+	for (const path of shippedTextFiles()) {
+		const text = read(path);
+		assert.doesNotMatch(text, /bofa-ds\/mailflare/, `${path} still points at the legacy fork`);
+		assert.doesNotMatch(text, /blue-pine-mail-dev/, `${path} exposes the private development repository`);
+	}
+	assert.match(read("src/lib/distribution/identity.ts"), /sourceRepository: "https:\/\/github\.com\/blue-pine-solutions\/blue-pine-mail",/);
+	assert.ok(read("docs/deployment.md").includes(`(https://deploy.workers.cloudflare.com/?url=${BLUE_PINE_REPOSITORY})`), "the Deploy button deploys the public repository");
+	assert.ok(read("docs/self-hosting.md").includes(`git clone ${BLUE_PINE_REPOSITORY} `), "self-hosting clones the public repository");
+	assert.match(read("NOTICE"), new RegExp(`Corresponding Source for Blue Pine Mail is available at:\\s+${BLUE_PINE_REPOSITORY.replaceAll(".", "\\.")}\\s`));
+	assert.match(read("package.json"), /"release:verify-source": "node scripts\/verify-public-source\.mjs"/);
 });
 
 test("relative links in the documentation point at files that exist", () => {

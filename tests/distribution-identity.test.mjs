@@ -44,7 +44,7 @@ await build({
 const app = await import(pathToFileURL(join(bundleDirectory, "entry.mjs")).href);
 test.after(() => rmSync(bundleDirectory, { recursive: true, force: true }));
 
-const DOWNSTREAM = "https://github.com/bofa-ds/mailflare";
+const DOWNSTREAM = "https://github.com/blue-pine-solutions/blue-pine-mail";
 const UPSTREAM = "https://github.com/hieunc229/mailflare";
 const SHA = "d9f0b2fb15c27f41c79e1bb1983d27724de57626";
 

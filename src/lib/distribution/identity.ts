@@ -9,7 +9,7 @@ export const DISTRIBUTION: DistributionIdentity = {
 	name: "Blue Pine Mail",
 	vendor: "Blue Pine Solutions",
 	version: "0.1.0",
-	sourceRepository: "https://github.com/bofa-ds/mailflare",
+	sourceRepository: "https://github.com/blue-pine-solutions/blue-pine-mail",
 	license: "AGPL-3.0-or-later",
 	licenseName: "GNU Affero General Public License v3.0 or later",
 	licenseUrl: "https://www.gnu.org/licenses/agpl-3.0.html",

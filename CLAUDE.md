@@ -133,7 +133,7 @@ The admin "Version and updates" card (`/api/admin/update`, GET only) shows the i
 
 ## Blue Pine downstream distribution
 
-This repository is **Blue Pine Mail**, a downstream distribution derived from Mailflare (`upstream` = hieunc229/mailflare, `origin` = bofa-ds/mailflare). `NOTICE` records the attribution and the modifications made so far. **Read `UPSTREAM.md` before any architectural change**; it is the engine/product boundary and the upstream integration contract.
+This repository is **Blue Pine Mail**, a downstream distribution derived from Mailflare (`upstream` = hieunc229/mailflare; `origin` = Blue Pine's private development repository; `public` = blue-pine-solutions/blue-pine-mail, the public source and release repository). `NOTICE` records the attribution and the modifications made so far. **Read `UPSTREAM.md` before any architectural change**; it is the engine/product boundary and the upstream integration contract.
 
 - **Engine follows upstream, product layer is Blue Pine's.** Schema, migrations, mail pipeline, routing, SMTP, JMAP, API v1, MCP tools, relay protocol, auth and runtime contracts stay upstream-shaped. Identity, feature policy, commercial policy, branding policy, legal/source surfaces, the release channel and operations belong to Blue Pine.
 - **Never casually rename compatibility-sensitive `mailflare` identifiers** (headers, stored HTML markers, backup format id, storage keys, env vars, `mailflare.sqlite`, ICS UIDs). The full list is in `UPSTREAM.md`. The word "Mailflare" in code is not by itself a reason to change it.

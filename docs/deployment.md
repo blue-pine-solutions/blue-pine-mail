@@ -14,9 +14,9 @@ Before starting, create the `CF_TOKEN` described below.
 
 ## Step 1: Deploy the Worker
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/bofa-ds/mailflare)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/blue-pine-solutions/blue-pine-mail)
 
-The button deploys this repository.
+The button deploys the `main` branch of the public Blue Pine Mail repository, which only holds published Blue Pine Mail source.
 
 1. Click **Deploy to Cloudflare** and sign in if prompted.
 2. Choose the Cloudflare account that owns the domain you want to use.
@@ -83,7 +83,7 @@ An agent with terminal access can run the manual deployment for you. Give it the
 The Worker and resource names below keep their upstream form for compatibility; do not rename them.
 
 ```text
-Install Blue Pine Mail from https://github.com/bofa-ds/mailflare in my Cloudflare
+Install Blue Pine Mail from https://github.com/blue-pine-solutions/blue-pine-mail in my Cloudflare
 account, from the release tag or commit I name (default: the latest bluepine-v* release).
 Ask me for my Cloudflare account ID, a scoped deployment API token, and a separate
 runtime CF_TOKEN through a secret input. Never print, commit, or place either token
@@ -149,6 +149,14 @@ If GitHub cannot be reached, the release source is private or no releases exist,
 Blue Pine Mail is licensed under the GNU Affero General Public License v3.0 or later. The app offers its source to everyone who uses it:
 
 - `/about` shows the product, distributor, version, Mailflare base, build commit, license and the upstream attribution.
-- `/source` redirects to the source of the running build: `https://github.com/bofa-ds/mailflare/tree/<commit>` when `BLUEPINE_BUILD_COMMIT` holds a valid commit SHA, otherwise the repository itself.
+- `/source` redirects to the source of the running build: `https://github.com/blue-pine-solutions/blue-pine-mail/tree/<commit>` when `BLUEPINE_BUILD_COMMIT` holds a valid commit SHA, otherwise the repository itself.
 
 Every page links to **Source** and **About** in the sidebar footer and on the sign-in screens. Set `BLUEPINE_BUILD_COMMIT` on production deployments so the source link points at exactly what is running. It is not needed for development.
+
+Only deploy commits that are already published in the public repository, so that `/source` resolves for every user. Before deploying a build, check it with the full commit SHA:
+
+```bash
+npm run release:verify-source -- <commit>
+```
+
+The check reads the public GitHub API without a token and fails unless that exact commit is contained in the public repository's `main` branch. It does not publish or change anything, and the app itself never depends on it.

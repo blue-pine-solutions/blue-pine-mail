@@ -4,7 +4,8 @@ Blue Pine Mail is a downstream distribution of Mailflare. This file records wher
 
 | | |
 |---|---|
-| Blue Pine repository | https://github.com/bofa-ds/mailflare (`origin`) |
+| Blue Pine public source and releases | https://github.com/blue-pine-solutions/blue-pine-mail (`public`) |
+| Blue Pine development | Blue Pine's private development repository (`origin`) |
 | Upstream | https://github.com/hieunc229/mailflare (`upstream`) |
 | Current upstream base | `ccca978b777a3b9b8e9b75b6436e2d1b5427b9b5` (upstream `main`; package version 0.4.0), certified 2026-09-29 |
 | Blue Pine main containing it | `2f9be7b8642f1be8b60a1f266acb1909033e303a` (integration merge `0e28557`, promoted to `main` 2026-09-29) |
@@ -86,6 +87,8 @@ Other browser storage keys and window event names prefixed `mailflare` follow th
 ## Customer releases
 
 Upstream Mailflare is an engineering input, never a customer update channel. Installations only learn about approved Blue Pine Mail releases: published (non-draft, non-prerelease) GitHub Releases tagged `bluepine-vMAJOR.MINOR.PATCH` in the Blue Pine repository, compared against `DISTRIBUTION.version`. The app checks for them but never installs or deploys; a release is rolled out with the installation's deployment method. Publish a release only for a commit that has passed the integration checks below.
+
+The public repository is the Corresponding Source for every build offered to users. Publish a commit there, by pushing it with an explicit refspec (`git push public <sha>:refs/heads/main`, never `--all`, `--mirror` or `--tags`), before any installation runs it, and confirm with `npm run release:verify-source -- <sha>` that `/source` for that build resolves publicly.
 
 ## Integration process
 
