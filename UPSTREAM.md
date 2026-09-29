@@ -49,7 +49,7 @@ Changes here are Blue Pine decisions. Upstream changes in these areas are transl
 - Blue Pine documentation.
 - Guard tests and downstream engineering rules (`tests/distribution-guard.test.mjs`, this file, the Blue Pine section of `CLAUDE.md`).
 
-Feature gates currently still use upstream's license entitlements (`src/lib/licenses/`). Replacing them with a Blue Pine feature policy is planned but not yet implemented.
+Optional features (custom branding, multiple accounts, shared mailboxes, account forwarding) are gated by the Blue Pine feature policy in `src/lib/distribution/features.ts`. Upstream's Paymug licensing layer (`src/lib/licenses/`, `/api/licenses`, the Licenses page and Upgrade pill) is removed. The `license_settings` table is kept, unused, for schema and backup compatibility.
 
 ## Never rename (compatibility)
 
@@ -81,7 +81,7 @@ Browser storage keys and window event names prefixed `mailflare` are not compati
 4. Resolve by boundary:
    - **Engine changes** are reviewed and normally accepted. Re-apply Blue Pine engine fixes if upstream has not taken them.
    - **Product-layer changes** are translated or ignored; Blue Pine's version wins.
-   - **New upstream license or product gates** must not simply be accepted. Record them and translate them to Blue Pine feature policy once that exists.
+   - **New upstream license or product gates** must not simply be accepted. Translate them to Blue Pine feature policy; changes to upstream's removed licensing files are dropped.
    - **Upstream migrations** are accepted verbatim and in order. Never edit a historical upstream migration, never skip or reorder one.
 5. Before merging the integration branch into `main`, run the full checks: `npm run lint`, `npx tsc --noEmit`, `node --test tests/*.test.mjs`, `npm run build:node`, a Docker smoke test, and an upgrade test against a copy of an existing data volume.
 6. Merge into `main` through a reviewed pull request with a merge commit.

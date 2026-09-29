@@ -14,7 +14,6 @@ import { MailboxSelector } from "@/components/mailbox-selector";
 import { AgentPanel } from "@/components/agent/agent-panel";
 import { AssistantOpenContext } from "@/components/agent/assistant-open-state";
 import { Button } from "@/components/ui/button";
-import { LicenseIndicator } from "@/components/license-indicator";
 import { DashboardNav } from "@/components/dashboard-nav";
 import { SidebarHeader } from "@/components/sidebar-header";
 import { SidebarProvider } from "@/components/sidebar-state";
@@ -67,7 +66,6 @@ export default function DashboardLayout({
                       >
                         <HelpCircle className="h-5 w-5" />
                       </Link> */}
-                      <LicenseIndicator />
                       {assistantEnabled && <Button type="button" variant="ghost" size="sm" className={assistantOpen ? "bg-blue-50 text-blue-700" : "text-neutral-600"} onClick={() => { setAssistantOpen((current) => !current); setAssistantFullSize(false); }} aria-label={assistantOpen ? "Close email assistant" : "Open email assistant"} aria-expanded={assistantOpen} aria-controls="email-assistant-panel"><Sparkles className="h-5 w-5" /></Button>}
                       <MailboxSelector />
                     </header>

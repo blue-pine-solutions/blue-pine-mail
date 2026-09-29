@@ -114,9 +114,9 @@ Mailbox authorization is separate from user role and goes through `src/lib/mailb
 
 `messages.status` is a free-text column driving the folder views: `received` (inbox), `sent`, `draft`, `spam`, `trash`, `archived`. Orthogonal to that are `starred`, `snoozedUntil`, and `folderId` (user-created folders in the `folders` table). A "folder" route under `src/app/(dashboard)/` is usually a status filter, not a table.
 
-### Licensing gates branding
+### Feature policy gates optional features
 
-Pro/Team keys are validated against Paymug (`src/lib/licenses/`); only a one-way key hash is stored. Without an active license the app falls back to the default name, icon, and favicon, and custom branding is unavailable. `getLicenseEntitlements` is the gate.
+`getFeaturePolicy()` (`src/lib/distribution/features.ts`) decides whether custom branding, multiple accounts, shared mailboxes and account forwarding are available; `BLUEPINE_DISABLED_FEATURES` turns them off per deployment. It is availability only: routes still authenticate, check admin role and mailbox access as before. Upstream Mailflare's Paymug licensing (`src/lib/licenses/`) is removed from this distribution; the `license_settings` table stays in the schema and backups for compatibility and has no effect.
 
 ### Self-update
 
@@ -138,7 +138,7 @@ This repository is **Blue Pine Mail**, a downstream distribution derived from Ma
 - **Engine follows upstream, product layer is Blue Pine's.** Schema, migrations, mail pipeline, routing, SMTP, JMAP, API v1, MCP tools, relay protocol, auth and runtime contracts stay upstream-shaped. Identity, feature policy, commercial policy, branding policy, legal/source surfaces, the release channel and operations belong to Blue Pine.
 - **Never casually rename compatibility-sensitive `mailflare` identifiers** (headers, stored HTML markers, backup format id, storage keys, env vars, `mailflare.sqlite`, ICS UIDs). The full list is in `UPSTREAM.md`. The word "Mailflare" in code is not by itself a reason to change it.
 - **Upstream migrations are taken verbatim and in order.** Never edit, skip, reorder or renumber them. Do not add downstream migrations unless `UPSTREAM.md` is updated first.
-- **Product policy belongs to Blue Pine.** Today feature gates still run through upstream's `getLicenseEntitlements` (`src/lib/licenses/`). The planned replacement is a Blue Pine distribution policy (`src/lib/distribution/`, *not yet implemented*). Do not accept new upstream license/commercial gates without reviewing them against that plan.
+- **Product policy belongs to Blue Pine.** Optional features are gated by the Blue Pine distribution policy in `src/lib/distribution/`; upstream's licensing layer has been removed. Upstream changes that add license or commercial gates must be translated to feature policy, not merged as-is.
 - **Prefer offering generic engine fixes upstream** so downstream divergence shrinks.
 - **`LICENSE` must remain untouched.**
 - **Git hygiene:** `docker-compose.yml` may hold operator-local changes. Never stage it without explicit instruction. Stage downstream work by explicit path (no `git add -A`, `git add .`, or `git commit -a`).
