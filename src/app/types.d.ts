@@ -1,5 +1,19 @@
 import type { LucideIcon } from "lucide-react";
 import type { ButtonProps } from "@/components/ui/button";
+import type { MailboxSelectorUser } from "@/components/mailbox-selector-types";
+import type { ReactNode } from "react";
+
+export type HomeAuthProviderProps = {
+	children: ReactNode;
+};
+
+export type HomeAuthResponse = {
+	user?: MailboxSelectorUser;
+};
+
+export type HomeAccountMenuProps = {
+	user: MailboxSelectorUser;
+};
 
 export type HomeAction = {
 	href: string;

@@ -20,6 +20,7 @@ import { BulkMessageToolbar } from "./bulk-message-toolbar";
 import { MessageListRowActions } from "./message-list-row-actions";
 import { dispatchMessageCountsDelta, toggleMessageStar } from "./message-list-row-actions-utils";
 import { MessageNavigationProgress, useMessageNavigation } from "./message-navigation";
+import { rememberOpenedUnreadMessage } from "./message-detail-navigation-utils";
 import { useConversationView } from "./use-conversation-view";
 import type { MessageFolderPageProps, MessageListRowProps } from "./types";
 import {
@@ -65,6 +66,7 @@ function MessageListRow({
 
 	function onMessageNavigate(event: MouseEvent<HTMLAnchorElement>) {
 		if (!read && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+			rememberOpenedUnreadMessage(message.id);
 			const previousThreadUnread = threadUnread;
 			setRead(true);
 			if (previousThreadUnread !== undefined) setThreadUnread(Math.max(0, previousThreadUnread - 1));

@@ -3,54 +3,74 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ChevronLeft, ChevronRight, Plus, Trash2 } from "lucide-react";
+import toast, { Toaster } from "react-hot-toast";
+import { AlignLeft, ChevronDown, ChevronLeft, ChevronRight, Clock3, MapPin, Palette, Plus, Repeat2, Trash2, UsersRound, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { authFetch } from "@/lib/auth/client";
+import { normalizeCalendarColor } from "@/lib/calendar/colors";
+import { DEFAULT_REPEAT_DAYS, parseCalendarRepeatDays } from "@/lib/calendar/recurrence";
+import { DEFAULT_FOLDER_COLOR, FOLDER_COLOR_OPTIONS } from "@/lib/folders/colors";
+import type { CalendarRepeat } from "@/lib/calendar/types";
 import { useSelectedMailbox } from "@/components/mailbox-provider";
 import { useSidebar } from "@/components/sidebar-state";
 import { SidebarResizeBoundary } from "@/components/sidebar-resize-boundary";
 import type { CalendarEvent, CalendarView, EventDragPreview, EventResizeEdge, EventResizeSession } from "./types";
 import {
   addDays, CALENDAR_END_HOUR, CALENDAR_HOUR_HEIGHT, CALENDAR_START_HOUR,
-  dateKey, dropStartForPosition, EVENT_COLORS, EVENT_COLOR_DOTS, eventPosition,
+  currentTimePosition, dateKey, dropStartForPosition, EVENT_COLOR_CLASSES, eventEndAfterMinutes, eventPosition, expandCalendarEvents,
   formatEventRange, formatHour, formatLocalDateTime, groupUpcomingEvents,
-  monthGridDates, resizeEventTimes, startOfDay, startOfWorkweek,
+  monthGridDates, nextCalendarOccurrence, PAST_EVENT_COLOR_CLASSES, resizeEventTimes, startOfDay, startOfWeek, takeUpcomingGroups, UPCOMING_BATCH_SIZE, WEEKDAY_OPTIONS,
 } from "./utils";
 import clsx from "clsx";
 
+const eventFieldClass = "h-9 border-transparent bg-transparent px-2 shadow-none hover:bg-white/60 focus:border-blue-600 focus:bg-white focus:shadow-sm";
+
 export default function CalendarPage() {
   const [events, setEvents] = useState<CalendarEvent[]>([]);
+  const [eventsVersion, setEventsVersion] = useState(0);
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
   const [visibleDate, setVisibleDate] = useState(() => new Date());
   const [view, setView] = useState<CalendarView>("week");
   const [monthPickerOpen, setMonthPickerOpen] = useState(false);
   const [pickerMonth, setPickerMonth] = useState(() => new Date());
   const monthPickerRef = useRef<HTMLDivElement | null>(null);
+  const upcomingScrollRef = useRef<HTMLDivElement | null>(null);
+  const upcomingSentinelRef = useRef<HTMLDivElement | null>(null);
   const [headerTarget, setHeaderTarget] = useState<HTMLElement | null>(null);
   const [draggedEvent, setDraggedEvent] = useState<CalendarEvent | null>(null);
   const [resizingEvent, setResizingEvent] = useState<CalendarEvent | null>(null);
   const [dragPreview, setDragPreview] = useState<EventDragPreview | null>(null);
   const dragOffsetPixels = useRef(0);
   const resizeSession = useRef<EventResizeSession | null>(null);
-  const [errorMessage, setErrorMessage] = useState("");
   const [title, setTitle] = useState("");
-  const [color, setColor] = useState("blue");
+  const [color, setColor] = useState<string>(DEFAULT_FOLDER_COLOR);
+  const [repeat, setRepeat] = useState<CalendarRepeat>("none");
+  const [repeatDays, setRepeatDays] = useState<number[]>(DEFAULT_REPEAT_DAYS);
   const [startsAt, setStartsAt] = useState("");
   const [endsAt, setEndsAt] = useState("");
   const [adding, setAdding] = useState(false);
+  const [closingEventEditor, setClosingEventEditor] = useState(false);
   const [guests, setGuests] = useState("");
+  const [location, setLocation] = useState("");
+  const [description, setDescription] = useState("");
   const [editing, setEditing] = useState<CalendarEvent | null>(null);
   const [pendingAction, setPendingAction] = useState<"save" | string | null>(null);
+  const [visibleUpcomingCount, setVisibleUpcomingCount] = useState(UPCOMING_BATCH_SIZE);
   const { selectedMailbox } = useSelectedMailbox();
   const { minimal } = useSidebar();
 
   const today = useMemo(() => startOfDay(new Date()), []);
-  const workweekStart = useMemo(() => startOfWorkweek(visibleDate), [visibleDate]);
+  const now = new Date(currentTime);
+  const weekStart = useMemo(() => startOfWeek(visibleDate), [visibleDate]);
   const days = useMemo(
-    () => view === "day" ? [startOfDay(visibleDate)] : Array.from({ length: 5 }, (_, index) => addDays(workweekStart, index)),
-    [view, visibleDate, workweekStart],
+    () => view === "day" ? [startOfDay(visibleDate)] : Array.from({ length: 7 }, (_, index) => addDays(weekStart, index)),
+    [view, visibleDate, weekStart],
   );
   const upcomingGroups = useMemo(() => groupUpcomingEvents(events, today), [events, today]);
+  const upcomingTotal = useMemo(() => upcomingGroups.reduce((count, group) => count + group.events.length, 0), [upcomingGroups]);
+  const visibleUpcomingGroups = useMemo(() => takeUpcomingGroups(upcomingGroups, visibleUpcomingCount), [upcomingGroups, visibleUpcomingCount]);
   const pickerDates = useMemo(() => monthGridDates(pickerMonth), [pickerMonth]);
   const previewEvent = useMemo(() => dragPreview && (draggedEvent || resizingEvent)
     ? {
@@ -66,6 +86,26 @@ export default function CalendarPage() {
   useEffect(() => {
     setHeaderTarget(document.getElementById("calendar-header-slot"));
   }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setCurrentTime(Date.now()), 60_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    setVisibleUpcomingCount(UPCOMING_BATCH_SIZE);
+  }, [events]);
+
+  useEffect(() => {
+    if (minimal || visibleUpcomingCount >= upcomingTotal || !upcomingScrollRef.current || !upcomingSentinelRef.current) return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry?.isIntersecting) return;
+      observer.disconnect();
+      setVisibleUpcomingCount((count) => Math.min(count + UPCOMING_BATCH_SIZE, upcomingTotal));
+    }, { root: upcomingScrollRef.current, rootMargin: "0px 0px 100px 0px" });
+    observer.observe(upcomingSentinelRef.current);
+    return () => observer.disconnect();
+  }, [minimal, upcomingTotal, visibleUpcomingCount]);
 
   useEffect(() => {
     if (!monthPickerOpen) return;
@@ -84,69 +124,95 @@ export default function CalendarPage() {
   }, [monthPickerOpen]);
 
   useEffect(() => {
-    const start = new Date(Math.min(today.getTime(), workweekStart.getTime(), startOfDay(visibleDate).getTime()));
-    const end = new Date(Math.max(addDays(today, 90).getTime(), addDays(workweekStart, 7).getTime(), addDays(visibleDate, 1).getTime()));
+    const start = new Date(Math.min(today.getTime(), weekStart.getTime(), startOfDay(visibleDate).getTime()));
+    const end = new Date(Math.max(addDays(today, 90).getTime(), addDays(weekStart, 7).getTime(), addDays(visibleDate, 1).getTime()));
     void authFetch(`/api/calendar/events?start=${start.toISOString()}&end=${end.toISOString()}`)
-      .then((response) => response.json())
-      .then((data) => setEvents(data.events ?? []));
-  }, [today, visibleDate, workweekStart]);
+      .then((response) => {
+        if (!response.ok) throw new Error("Could not load calendar events.");
+        return response.json();
+      })
+      .then((data) => setEvents(expandCalendarEvents(data.events ?? [], start, end)))
+      .catch(() => toast.error("Could not load calendar events."));
+  }, [today, visibleDate, weekStart, eventsVersion]);
 
   function openNewEvent(day = visibleDate, startAt?: Date) {
     const start = startAt ? new Date(startAt) : new Date(day);
     if (!startAt) start.setHours(Math.min(Math.max(new Date().getHours() + 1, CALENDAR_START_HOUR), CALENDAR_END_HOUR - 1), 0, 0, 0);
     setEditing(null);
     setTitle("");
-    setColor("blue");
+    setColor(DEFAULT_FOLDER_COLOR);
+    setRepeat("none");
+    setRepeatDays(DEFAULT_REPEAT_DAYS);
     setGuests("");
+    setLocation("");
+    setDescription("");
     setStartsAt(formatLocalDateTime(start));
     setEndsAt(formatLocalDateTime(new Date(start.getTime() + 60 * 60_000)));
+    setClosingEventEditor(false);
     setAdding(true);
   }
 
   async function addEvent() {
     setPendingAction("save");
     try {
+      const editedStart = editing && startsAt === formatLocalDateTime(new Date(editing.startsAt)) ? new Date(editing.startsAt) : new Date(startsAt);
+      const editedEnd = editing && endsAt === formatLocalDateTime(new Date(editing.endsAt)) ? new Date(editing.endsAt) : new Date(endsAt);
+      const movingToPast = Boolean(editing && editing.repeat !== "none" && editedStart.getTime() < Date.now() && editedStart.getTime() !== new Date(editing.startsAt).getTime());
+      const effectiveFrom = editing && editing.repeat !== "none" && !movingToPast ? new Date() : null;
+      let savedStart = editedStart;
+      let savedEnd = editedEnd;
+      if (editing && effectiveFrom) {
+        const offset = editedStart.getTime() - new Date(editing.startsAt).getTime();
+        const next = nextCalendarOccurrence(editing, new Date(effectiveFrom.getTime() - offset));
+        if (!next) { toast.error("No future occurrences remain to update."); return; }
+        savedStart = new Date(next.getTime() + offset);
+        savedEnd = new Date(savedStart.getTime() + editedEnd.getTime() - editedStart.getTime());
+      }
+      const repeatAnchorDay = editing?.repeat === "monthly" && startsAt.slice(0, 10) === formatLocalDateTime(new Date(editing.startsAt)).slice(0, 10)
+        ? editing.repeatAnchorDay ?? new Date(editing.seriesStartsAt ?? editing.startsAt).getDate()
+        : editedStart.getDate();
       const response = await authFetch(editing ? `/api/calendar/events/${editing.id}` : "/api/calendar/events", {
         method: editing ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          title, startsAt, endsAt, color, attendees: guests.split(","),
-          description: editing?.description ?? "",
-          location: editing?.location ?? "",
+          title, startsAt: savedStart.toISOString(), endsAt: savedEnd.toISOString(), color, repeat, repeatDays, repeatAnchorDay, effectiveFrom: effectiveFrom?.toISOString(), moveOccurrenceToPast: movingToPast, attendees: guests.split(","),
+          description,
+          location,
           mailboxId: selectedMailbox?.id,
           from: selectedMailbox?.senderAddresses?.[0] ??
             (selectedMailbox ? `${selectedMailbox.localPart}@${selectedMailbox.hostname}` : ""),
         }),
       });
-      const data = await response.json();
       if (response.ok) {
-        setEvents((items) => (editing
-          ? items.map((event) => event.id === editing.id ? {
-            ...event, title, color,
-            startsAt: new Date(startsAt).toISOString(),
-            endsAt: new Date(endsAt).toISOString(),
-            attendees: JSON.stringify(guests.split(",").filter(Boolean)),
-          } : event)
-          : [...items, data.event]
-        ).sort((a, b) => a.startsAt.localeCompare(b.startsAt)));
-        setAdding(false);
-        setEditing(null);
+        setEventsVersion((version) => version + 1);
+        setClosingEventEditor(true);
+      } else {
+        const result = await response.json();
+        toast.error(result.error ?? "Could not save the event. Please try again.");
       }
+    } catch {
+      toast.error("Could not save the event. Please try again.");
     } finally {
       setPendingAction(null);
     }
   }
 
   async function deleteEvent(id: string) {
-    if (!window.confirm("Delete this event?")) return;
+    const recurring = editing && editing.repeat !== "none";
+    if (!window.confirm(recurring ? "Delete future occurrences from now?" : "Delete this event?")) return;
     setPendingAction(id);
     try {
-      const response = await authFetch(`/api/calendar/events/${id}`, { method: "DELETE" });
+      const effectiveFrom = recurring ? new Date().toISOString() : undefined;
+      const response = await authFetch(`/api/calendar/events/${id}`, { method: "DELETE", headers: effectiveFrom ? { "Content-Type": "application/json" } : undefined, body: effectiveFrom ? JSON.stringify({ effectiveFrom }) : undefined });
       if (response.ok) {
-        setEvents((items) => items.filter((event) => event.id !== id));
-        setAdding(false);
-        setEditing(null);
+        setEventsVersion((version) => version + 1);
+        setClosingEventEditor(true);
+      } else {
+        const result = await response.json();
+        toast.error(result.error ?? "Could not delete the event. Please try again.");
       }
+    } catch {
+      toast.error("Could not delete the event. Please try again.");
     } finally {
       setPendingAction(null);
     }
@@ -155,10 +221,15 @@ export default function CalendarPage() {
   function editEvent(event: CalendarEvent) {
     setEditing(event);
     setTitle(event.title);
-    setColor(event.color ?? "blue");
+    setColor(normalizeCalendarColor(event.color));
+    setRepeat(event.repeat);
+    setRepeatDays(event.repeat === "weekdays" ? parseCalendarRepeatDays(event.repeatDays) : DEFAULT_REPEAT_DAYS);
+    setLocation(event.location ?? "");
+    setDescription(event.description ?? "");
     setStartsAt(formatLocalDateTime(new Date(event.startsAt)));
     setEndsAt(formatLocalDateTime(new Date(event.endsAt)));
     setGuests(JSON.parse(event.attendees || "[]").join(", "));
+    setClosingEventEditor(false);
     setAdding(true);
   }
 
@@ -170,8 +241,18 @@ export default function CalendarPage() {
       return;
     }
     setPendingAction(event.id);
-    setErrorMessage("");
     try {
+      const movingToPast = event.repeat !== "none" && startsAt.getTime() < Date.now();
+      const effectiveFrom = event.repeat !== "none" && !movingToPast ? new Date() : null;
+      let savedStart = startsAt;
+      let savedEnd = endsAt;
+      if (effectiveFrom) {
+        const offset = startsAt.getTime() - new Date(event.startsAt).getTime();
+        const next = nextCalendarOccurrence(event, new Date(effectiveFrom.getTime() - offset));
+        if (!next) { toast.error("No future occurrences remain to update."); return; }
+        savedStart = new Date(next.getTime() + offset);
+        savedEnd = new Date(savedStart.getTime() + endsAt.getTime() - startsAt.getTime());
+      }
       const response = await authFetch(`/api/calendar/events/${event.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -181,21 +262,26 @@ export default function CalendarPage() {
           location: event.location,
           attendees: JSON.parse(event.attendees || "[]"),
           color: event.color,
-          startsAt: startsAt.toISOString(),
-          endsAt: endsAt.toISOString(),
+          repeat: event.repeat,
+          repeatDays: parseCalendarRepeatDays(event.repeatDays),
+          repeatAnchorDay: event.repeat === "monthly" && dateKey(startsAt) === dateKey(new Date(event.startsAt))
+            ? event.repeatAnchorDay ?? new Date(event.seriesStartsAt ?? event.startsAt).getDate()
+            : startsAt.getDate(),
+          effectiveFrom: effectiveFrom?.toISOString(),
+          moveOccurrenceToPast: movingToPast,
+          startsAt: savedStart.toISOString(),
+          endsAt: savedEnd.toISOString(),
           from: selectedMailbox?.senderAddresses?.[0] ??
             (selectedMailbox ? `${selectedMailbox.localPart}@${selectedMailbox.hostname}` : ""),
         }),
       });
       if (!response.ok) {
-        setErrorMessage("Could not update the event time. Please try again.");
+        toast.error("Could not update the event time. Please try again.");
         return;
       }
-      setEvents((items) => items.map((item) => item.id === event.id
-        ? { ...item, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString() }
-        : item).sort((a, b) => a.startsAt.localeCompare(b.startsAt)));
+      setEventsVersion((version) => version + 1);
     } catch {
-      setErrorMessage("Could not update the event time. Please try again.");
+      toast.error("Could not update the event time. Please try again.");
     } finally {
       setDraggedEvent(null);
       setResizingEvent(null);
@@ -259,6 +345,7 @@ export default function CalendarPage() {
 
   return (
     <div className={clsx("flex h-full min-h-0 flex-col bg-[#f6f8fc] pl-3 lg:flex-row transition-[gap] duration-200 ease-in-out motion-reduce:transition-none", minimal ? "gap-0" : "gap-3")}>
+      <Toaster position="bottom-right" />
       {headerTarget && createPortal(
         <div className="flex min-w-0 flex-1 items-center justify-between gap-3">
           <div ref={monthPickerRef} className="relative shrink-0">
@@ -323,19 +410,19 @@ export default function CalendarPage() {
       )}
       <aside className={clsx("relative shrink-0 rounded-t-3xl bg-white transition-[width,max-height] duration-200 ease-in-out motion-reduce:transition-none lg:h-full lg:max-h-none", minimal ? "w-0 max-h-0" : "w-full max-h-[36vh] lg:w-[var(--sidebar-width)]")} aria-hidden={minimal}>
         {!minimal && (
-          <div className="h-full overflow-y-auto overscroll-contain rounded-t-3xl px-5 py-5">
+          <div ref={upcomingScrollRef} className="h-full overflow-y-auto overscroll-contain rounded-t-3xl px-5 py-5">
             {upcomingGroups.length === 0 ? (
               <div>
                 <h2 className="text-lg font-semibold text-neutral-900">Upcoming</h2>
                 <p className="mt-4 text-sm text-neutral-400">No upcoming events.</p>
               </div>
-            ) : upcomingGroups.map((group) => (
+            ) : visibleUpcomingGroups.map((group) => (
               <section key={group.key} className="mb-6 last:mb-0">
-                <h2 className="mb-3 text-base font-semibold text-neutral-900">{group.label}</h2>
+                <h2 className="sticky -top-5 z-10 -mx-5 mb-2 bg-white px-5 py-2 text-base font-semibold text-neutral-900">{group.label}</h2>
                 <div className="space-y-2">
                   {group.events.map((event) => (
                     <button key={event.id} type="button" onClick={() => editEvent(event)} className="group flex w-full items-start gap-3 text-left">
-                      <span className={`mt-0.5 h-4 w-4 shrink-0 rounded-full border-2 border-white ring-1 ring-neutral-200 ${EVENT_COLOR_DOTS[event.color as keyof typeof EVENT_COLOR_DOTS] ?? EVENT_COLOR_DOTS.blue}`} />
+                      <span className="mt-0.5 h-4 w-4 shrink-0 rounded-full border-2 border-white ring-1 ring-neutral-200" style={{ backgroundColor: normalizeCalendarColor(event.color) }} />
                       <span className="min-w-0">
                         <span className="block truncate text-sm text-neutral-700 group-hover:text-neutral-950">{event.title}</span>
                         <span className="block text-xs text-neutral-400">{formatEventRange(event)}</span>
@@ -345,21 +432,21 @@ export default function CalendarPage() {
                 </div>
               </section>
             ))}
+            {visibleUpcomingCount < upcomingTotal && <div ref={upcomingSentinelRef} aria-hidden="true" className="h-1" />}
           </div>
         )}
         {!minimal && <div className="hidden lg:block"><SidebarResizeBoundary /></div>}
       </aside>
 
       <section className="min-h-0 min-w-0 flex-1 rounded-t-3xl bg-white flex flex-col overflow-hidden">
-        {errorMessage && <div role="alert" className="border-b border-red-100 bg-red-50 px-4 py-2 text-sm text-red-700">{errorMessage}</div>}
         <div className="sticky top-0 z-30 grid border-b border-neutral-200 bg-white h-14" style={{ gridTemplateColumns: `64px repeat(${days.length}, minmax(0, 1fr))` }}>
           <div />
           {days.map((day) => (
-            <div key={dateKey(day)} className={`border-l border-neutral-100 px-3 py-2 text-xs ${dateKey(day) === dateKey(today) ? "text-blue-600" : "text-neutral-500"}`}>
+            <div key={dateKey(day)} className={`border-l border-neutral-100 px-3 py-2 text-xs ${dateKey(day) === dateKey(today) ? "text-blue-700" : "text-neutral-700"}`}>
               {day.toLocaleDateString(undefined, { weekday: "short" })}
-              <b className="text-xl block">
+              <span className="text-2xl block font-medium">
                 {day.toLocaleDateString(undefined, { day: "numeric" })}
-              </b>
+              </span>
             </div>
           ))}
         </div>
@@ -372,7 +459,7 @@ export default function CalendarPage() {
               ))}
             </div>
             {days.map((day) => (
-              <div key={dateKey(day)} className="relative border-l border-neutral-100"
+              <div key={dateKey(day)} className={"relative border-l border-neutral-100"}
                 onDragOver={(event) => {
                   if (!draggedEvent) return;
                   event.preventDefault();
@@ -391,7 +478,8 @@ export default function CalendarPage() {
                 {events.filter((event) => new Date(event.startsAt) < addDays(day, 1) && new Date(event.endsAt) > day).map((event) => {
                   const position = eventPosition(event, day);
                   if (!position) return null;
-                  const color = EVENT_COLORS[event.color as keyof typeof EVENT_COLORS] ?? EVENT_COLORS.blue;
+                  const eventColor = normalizeCalendarColor(event.color);
+                  const isPastEvent = new Date(event.endsAt).getTime() <= currentTime;
                   const canResizeStart = dateKey(new Date(event.startsAt)) === dateKey(day);
                   const canResizeEnd = new Date(event.endsAt).getTime() <= addDays(day, 1).getTime();
                   return (
@@ -400,9 +488,9 @@ export default function CalendarPage() {
                         onDragStart={(dragEvent) => { dragOffsetPixels.current = dragEvent.clientY - dragEvent.currentTarget.getBoundingClientRect().top; dragEvent.dataTransfer.setData("text/plain", event.id); dragEvent.dataTransfer.effectAllowed = "move"; setDraggedEvent(event); }}
                         onDragEnd={() => { setDraggedEvent(null); setDragPreview(null); }}
                         title={`${event.title} · ${formatEventRange(event)}`}
-                        className={`absolute left-1 right-1 z-10 flex cursor-move flex-col items-start justify-start overflow-hidden rounded-lg pr-2 pl-4 text-left hover:brightness-95 ${position.height >= 20 ? "py-1.5" : "py-0"} ${draggedEvent?.id === event.id || resizingEvent?.id === event.id ? "opacity-40" : ""} ${color}`}
+                        className={`absolute left-1 right-1 z-10 flex cursor-move flex-col items-start justify-start overflow-hidden rounded-lg pr-2 pl-4 text-left hover:brightness-95 ${isPastEvent ? PAST_EVENT_COLOR_CLASSES[eventColor] : EVENT_COLOR_CLASSES[eventColor]} ${position.height >= 20 ? "py-1.5" : "py-0"} ${draggedEvent?.id === event.id || resizingEvent?.id === event.id ? "opacity-40" : ""}`}
                         style={{ top: position.top, height: position.height }}>
-                          <span className={clsx("absolute top-1 left-1 border-l-4 rounded-xl w-1 h-[calc(100%-8px)] block bg-amber-400", color)} />
+                          <span className="absolute top-1 left-1 block h-[calc(100%-8px)] w-1 rounded-xl bg-current" />
                         {position.height >= 15 && <span className="block w-full truncate text-[12px] font-semibold leading-4">{event.title}</span>}
                         {position.height >= 34 && <span className="block w-full truncate text-[11px] leading-4 opacity-70">{formatEventRange(event)}</span>}
                       </button>
@@ -421,12 +509,18 @@ export default function CalendarPage() {
                   );
                 })}
                 {dragPreview && previewEvent && previewPosition && dateKey(dragPreview.day) === dateKey(day) && (
-                  <div className={`pointer-events-none absolute left-1 right-1 z-20 rounded-lg border-2 border-dashed opacity-80 ${EVENT_COLORS[previewEvent.color as keyof typeof EVENT_COLORS] ?? EVENT_COLORS.blue}`}
+                  <div className={`pointer-events-none absolute left-1 right-1 z-20 rounded-lg border-2 border-dashed border-white ${new Date(previewEvent.endsAt).getTime() <= currentTime ? PAST_EVENT_COLOR_CLASSES[normalizeCalendarColor(previewEvent.color)] : EVENT_COLOR_CLASSES[normalizeCalendarColor(previewEvent.color)]}`}
                     style={{ top: previewPosition.top, height: previewPosition.height }}>
                     <span className="absolute left-1 top-0 z-10 whitespace-nowrap rounded bg-neutral-900 px-1.5 py-0.5 text-[10px] font-medium text-white">
                       {formatEventRange(previewEvent)}
                     </span>
                     {previewPosition.height >= 50 && <span className="block truncate px-2 pt-6 text-[12px] font-semibold">{previewEvent.title}</span>}
+                  </div>
+                )}
+                {dateKey(day) === dateKey(now) && (
+                  <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 z-30" style={{ top: currentTimePosition(now) }}>
+                    <div className="h-1 w-full bg-blue-600" />
+                    <div className="absolute -left-2.5 -top-2 h-5 w-5 rounded-full bg-blue-600" />
                   </div>
                 )}
               </div>
@@ -436,33 +530,94 @@ export default function CalendarPage() {
       </section>
 
       {adding && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-neutral-950/35 p-4">
-          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
-            <h2 className="text-lg font-semibold">{editing ? "Edit event" : "Create event"}</h2>
-            <div className="mt-5 grid gap-3">
-              <Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Event title" />
-              <Input value={guests} onChange={(event) => setGuests(event.target.value)} placeholder="Add guests (comma-separated emails)" />
-              <div>
-                <span className="mb-2 block text-sm font-medium text-neutral-700">Color</span>
-                <div role="radiogroup" aria-label="Event color" className="flex items-center gap-2">
-                  {Object.entries(EVENT_COLOR_DOTS).map(([value, dotClass]) => (
-                    <button key={value} type="button" role="radio" aria-label={value} aria-checked={color === value} onClick={() => setColor(value)}
-                      className={`flex h-8 w-8 items-center justify-center rounded-full ${color === value ? "ring-2 ring-neutral-700 ring-offset-2" : "hover:ring-2 hover:ring-neutral-200"}`}>
-                      <span className={`h-6 w-6 rounded-full ${dotClass}`} />
-                    </button>
+        <div className={clsx("dialog-overlay fixed inset-0 z-50 flex items-center justify-center bg-neutral-950/35 p-4", closingEventEditor && "pointer-events-none")} data-state={closingEventEditor ? "closed" : "open"}>
+          <div role="dialog" aria-modal="true" aria-label={editing ? "Edit event" : "Create event"} className="dialog-content max-h-[calc(100dvh-2rem)] w-full max-w-xl overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl sm:p-6" data-state={closingEventEditor ? "closed" : "open"}
+            onAnimationEnd={(event) => {
+              if (!closingEventEditor || event.target !== event.currentTarget) return;
+              setAdding(false);
+              setEditing(null);
+              setClosingEventEditor(false);
+            }}>
+            <div className="flex items-start gap-3">
+              <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Add title" aria-label="Event name"
+                className="min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-2 py-1 text-2xl font-medium text-neutral-900 outline-none placeholder:text-neutral-500 hover:bg-white/60 focus:border-blue-600 focus:bg-white" />
+              <button type="button" aria-label="Close event editor" disabled={pendingAction === "save"} onClick={() => setClosingEventEditor(true)} className="shrink-0 rounded-full p-1 text-neutral-600 hover:bg-neutral-200 disabled:opacity-50"><X className="h-5 w-5" /></button>
+            </div>
+            <div className="mt-4 space-y-2">
+              <div className="grid grid-cols-[24px_minmax(0,1fr)] items-start gap-3">
+                <Repeat2 aria-hidden="true" className="mt-2 h-5 w-5 text-neutral-600" />
+                <div className="min-w-0">
+                  <select value={repeat} onChange={(event) => setRepeat(event.target.value as CalendarRepeat)} aria-label="Repeat"
+                    className="h-9 w-full rounded-md border border-transparent bg-transparent px-2 text-sm text-neutral-700 outline-none hover:bg-neutral-50 focus:border-blue-600 focus:bg-white">
+                    <option value="none">Does not repeat</option>
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                    <option value="weekdays">Weekdays</option>
+                  </select>
+                  {repeat === "weekdays" && (
+                    <div role="group" aria-label="Repeat on weekdays" className="flex flex-wrap gap-1.5 px-2 pt-1">
+                      {WEEKDAY_OPTIONS.map((day) => (
+                        <button key={day.value} type="button" aria-label={`Repeat on ${day.label}`} aria-pressed={repeatDays.includes(day.value)}
+                          onClick={() => setRepeatDays((selected) => selected.includes(day.value) ? selected.filter((value) => value !== day.value) : [...selected, day.value].sort((a, b) => a - b))}
+                          className={clsx("rounded-full px-2.5 py-1 text-xs font-medium", repeatDays.includes(day.value) ? "bg-blue-600 text-white" : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200")}>
+                          {day.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="grid grid-cols-[24px_minmax(0,1fr)] items-start gap-3">
+                <Clock3 aria-hidden="true" className="mt-2 h-5 w-5 text-neutral-600" />
+                <div className="group min-w-0">
+                  <div className="grid gap-1 sm:grid-cols-2">
+                    <label className="relative block min-w-0">
+                      <span className="pointer-events-none absolute left-2 top-1/2 z-10 -translate-y-1/2 text-xs font-medium text-neutral-500">From</span>
+                      <Input type="datetime-local" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} aria-label="From date and time" className={`${eventFieldClass} pl-14`} />
+                    </label>
+                    <label className="relative block min-w-0">
+                      <span className="pointer-events-none absolute left-2 top-1/2 z-10 -translate-y-1/2 text-xs font-medium text-neutral-500">To</span>
+                      <Input type="datetime-local" value={endsAt} onChange={(event) => setEndsAt(event.target.value)} aria-label="To date and time" className={`${eventFieldClass} pl-14`} />
+                    </label>
+                  </div>
+                  <div className="hidden flex-wrap gap-1 pt-1 group-focus-within:flex" aria-label="Set event duration">
+                    {([{ label: "15 mins", minutes: 15 }, { label: "30 mins", minutes: 30 }, { label: "1 hour", minutes: 60 }, { label: "1 day", minutes: 1440 }] as const).map((preset) => (
+                      <Button key={preset.minutes} type="button" variant="ghost" disabled={!startsAt || Number.isNaN(new Date(startsAt).getTime())} onClick={() => setEndsAt(eventEndAfterMinutes(startsAt, preset.minutes))} className="h-7 rounded-full px-2 text-xs text-neutral-600 hover:bg-neutral-100">
+                        {preset.label}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-[24px_minmax(0,1fr)] items-center gap-3">
+                <UsersRound aria-hidden="true" className="h-5 w-5 text-neutral-600" />
+                <Input value={guests} onChange={(event) => setGuests(event.target.value)} placeholder="Add guests" aria-label="Guests (comma-separated emails)" className={eventFieldClass} />
+              </div>
+              <div className="grid grid-cols-[24px_minmax(0,1fr)] items-center gap-3">
+                <MapPin aria-hidden="true" className="h-5 w-5 text-neutral-600" />
+                <Input value={location} onChange={(event) => setLocation(event.target.value)} placeholder="Add location" aria-label="Location" className={eventFieldClass} />
+              </div>
+              <div className="grid grid-cols-[24px_minmax(0,1fr)] items-start gap-3">
+                <AlignLeft aria-hidden="true" className="mt-2 h-5 w-5 text-neutral-600" />
+                <Textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Add description" aria-label="Description" rows={1} className="min-h-9 resize-none border-transparent bg-transparent px-2 py-2 shadow-none hover:bg-white/60 focus:min-h-24 focus:resize-y focus:border-blue-600 focus:bg-white focus-visible:ring-0" />
+              </div>
+              <div className="grid grid-cols-[24px_minmax(0,1fr)] items-center gap-3">
+                <Palette aria-hidden="true" className="h-5 w-5 text-neutral-600" />
+                <div role="radiogroup" aria-label="Event color" className="flex flex-wrap items-center gap-1.5 px-2">
+                  {FOLDER_COLOR_OPTIONS.map((option) => (
+                    <button key={option.value} type="button" role="radio" aria-label={option.label} title={option.label} aria-checked={color === option.value} onClick={() => setColor(option.value)}
+                      className={`h-7 w-7 rounded-full border-2 transition-transform hover:scale-110 ${color === option.value ? "border-neutral-900 ring-2 ring-neutral-300 ring-offset-2" : "border-transparent"}`}
+                      style={{ backgroundColor: option.value }} />
                   ))}
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <Input type="datetime-local" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} aria-label="Start date and time" />
-                <Input type="datetime-local" value={endsAt} onChange={(event) => setEndsAt(event.target.value)} aria-label="End date and time" />
-              </div>
-              <div className="mt-2 flex justify-between gap-2">
-                <div>{editing && <Button variant="ghost" disabled={pendingAction !== null} onClick={() => void deleteEvent(editing.id)} className="text-red-600 hover:bg-red-50"><Trash2 className="h-4 w-4" />Delete</Button>}</div>
-                <div className="flex gap-2">
-                  <Button variant="ghost" disabled={pendingAction === "save"} onClick={() => { setEditing(null); setAdding(false); }}>Cancel</Button>
-                  <Button onClick={() => void addEvent()} disabled={!title || !startsAt || !endsAt || new Date(endsAt) <= new Date(startsAt) || pendingAction === "save"}>
-                    {pendingAction === "save" ? "Saving..." : editing ? "Save changes" : "Create event"}
+              <div className="grid grid-cols-[24px_minmax(0,1fr)] gap-3 pt-6">
+                <div />
+                <div className="flex justify-between gap-2">
+                  <div>{editing && <Button variant="ghost" disabled={pendingAction !== null} onClick={() => void deleteEvent(editing.id)} className="px-2 text-red-600 hover:bg-red-50"><Trash2 className="h-4 w-4" />Delete</Button>}</div>
+                  <Button onClick={() => void addEvent()} disabled={!title.trim() || !startsAt || !endsAt || new Date(endsAt) <= new Date(startsAt) || (repeat === "weekdays" && repeatDays.length === 0) || pendingAction === "save"} className="rounded-full bg-blue-600 px-6 text-white hover:bg-blue-700">
+                    {pendingAction === "save" ? "Saving..." : "Save"}
                   </Button>
                 </div>
               </div>

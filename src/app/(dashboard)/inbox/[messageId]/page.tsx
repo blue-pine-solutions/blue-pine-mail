@@ -1,9 +1,8 @@
 "use client";
 
-import Link from "next/link";
-import { useParams, usePathname } from "next/navigation";
+import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
-import { ArrowLeft, Cloud, Columns2, ExternalLink, List, Rows2 } from "lucide-react";
+import { Cloud, ExternalLink } from "lucide-react";
 import dayjs from "dayjs";
 import { MarkAsRead } from "@/components/mark-read";
 import { useSelectedMailbox } from "@/components/mailbox-provider";
@@ -16,14 +15,13 @@ import { MessageDetailSkeleton } from "@/components/page-skeletons";
 import { usePageLoading } from "@/components/page-loading";
 import { PreviousMessage } from "@/components/previous-message";
 import { ConversationThread } from "@/components/messages/conversation-thread";
+import { MessageDetailNavigation } from "@/components/messages/message-detail-navigation";
+import { MessageReadingHeaderButton } from "@/components/messages/message-reading-header-button";
 import { QuotedEmailToggle } from "@/components/messages/quoted-email-toggle";
 import { ThreadMessageActions } from "@/components/messages/thread-message-actions";
-import { SpamScoreDetails } from "@/components/messages/spam-score-details";
 import { useMessageThread } from "@/components/messages/use-message-thread";
 import { useLatestMessagesFirst } from "@/components/messages/use-latest-messages-first";
 import { useMessageListVisibility } from "@/components/messages/message-list-visibility";
-import { Tooltip } from "@/components/ui/tooltip";
-import { getMessageBackHref } from "@/components/message-actions/utils";
 import { getEmailAddress, getEmailDisplayName, splitEmailAddressList } from "@/lib/email/address";
 import type { MessageAttachment, MessageDetailResponse } from "./types";
 import {
@@ -40,10 +38,10 @@ import { sanitizeEmailHtml } from "./email-html-sanitizer";
 import { collapseQuotedEmailHtml } from "./quote-collapse-utils";
 import clsx from "clsx";
 import { useAssistantOpen } from "@/components/agent/assistant-open-state";
+import { useMessageContentScroll } from "./use-message-content-scroll";
 
 export default function MessageDetailPage() {
   const params = useParams<{ messageId: string }>();
-  const pathname = usePathname();
   const { selectedMailbox, mailboxes } = useSelectedMailbox();
   const messageId = params.messageId;
   const [data, setData] = useState<MessageDetailResponse | null>(null);
@@ -52,11 +50,12 @@ export default function MessageDetailPage() {
     useState<MessageAttachment | null>(null);
   const [threadExpanded, setThreadExpanded] = useState(false);
   const [latestMessagesFirst] = useLatestMessagesFirst();
-  const { visible: messageListVisible, toggle: toggleMessageList } = useMessageListVisibility();
+  const { visible: messageListVisible } = useMessageListVisibility();
   usePageLoading(loading);
   const thread = useMessageThread(messageId, data?.message?.threadId);
   const assistantVisible = useAssistantOpen();
   const isAnyPanelVisible = messageListVisible || assistantVisible;
+  const { scrollRef, scrolled, handleScroll } = useMessageContentScroll(messageId, loading);
 
   useEffect(() => {
     let cancelled = false;
@@ -146,9 +145,9 @@ export default function MessageDetailPage() {
   );
   return (<>
 
-    <div className="flex py-2 h-14 items-center justify-between px-2 border-b border-neutral-200 sticky top-0 bg-white z-40 gap-4">
-      <Tooltip label={assistantVisible ? null : messageListVisible ? "Hide email list" : "Show email list"} className="hidden lg:inline-flex"><button type="button" className={clsx(assistantVisible ? "opacity-40" : messageListVisible ? "" : "opacity-60 hover:opacity-100", !assistantVisible && "hover:bg-neutral-100 hover:text-neutral-900", "relative z-10 shrink-0 rounded-full p-2 text-neutral-600 duration-200")} onClick={toggleMessageList} disabled={assistantVisible} aria-label={messageListVisible ? "Hide email list" : "Show email list"} aria-pressed={messageListVisible}><Columns2 size={18} /></button></Tooltip>
-      <div className="min-w-0 flex-1" />
+    <div className={clsx("flex py-2 h-12 items-center px-2 border-b sticky top-0 bg-white z-40 gap-3", scrolled ? "border-neutral-200" : "border-transparent")}>
+      <MessageReadingHeaderButton assistantVisible={assistantVisible} />
+      {/* <div className="min-w-0 flex-1" /> */}
       {/* <div className="flex items-center flex-row gap-6">
 					<Link
 						href={getMessageBackHref(message.direction, message.status)}
@@ -173,12 +172,13 @@ export default function MessageDetailPage() {
         messageMeta={message}
         bodyHtml={body?.htmlBody}
       />
+      <MessageDetailNavigation messageId={message.id} unread={message.direction === "inbound" && !message.read} />
     </div>
 
-    <div className="h-full overflow-y-auto overscroll-contain scrollbar-gutter-stable">
+    <div ref={scrollRef} onScroll={handleScroll} className="h-full overflow-y-auto overscroll-contain scrollbar-gutter-stable flex-1 min-h-0">
       {!message.read && <MarkAsRead messageId={message.id} />}
 
-      <h1 className={clsx(!isAnyPanelVisible ? "pl-16" : "pl-10", "pr-6 pb-2 pt-4 text-2xl font-medium text-neutral-900")} title={message.subject ?? "(no subject)"}>
+      <h1 className={clsx(!isAnyPanelVisible ? "pl-16" : "pl-10", "pr-6 pb-2 pt-2 text-2xl text-neutral-900")} title={message.subject ?? "(no subject)"}>
         {message.subject ?? "(no subject)"}
       </h1>
       {/* <div className="px-6">

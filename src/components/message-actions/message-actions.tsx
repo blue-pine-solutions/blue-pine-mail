@@ -2,9 +2,10 @@
 
 import { createElement, useState, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { Archive, Ban, BellOff, FileCode2, Forward, Mail, MailOpen, MoreVertical, Reply, ReplyAll, ShieldAlert, Trash2 } from "lucide-react";
+import { Archive, Ban, BellOff, Clock, FileCode2, Forward, Mail, MailOpen, MoreVertical, Reply, ReplyAll, ShieldAlert, Trash2 } from "lucide-react";
 import { useCompose } from "@/components/compose/compose-context";
 import { MessageSourceDialog } from "@/components/messages/message-source-dialog";
+import { MessageSnoozeDialog } from "./message-snooze-dialog";
 import { useHotkeys, useShortcuts } from "@/components/shortcuts";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -50,6 +51,7 @@ export function MessageActions({
 	const [error, setError] = useState<string | null>(null);
 	const [moreOpen, setMoreOpen] = useState(false);
 	const [sourceOpen, setSourceOpen] = useState(false);
+	const [snoozeOpen, setSnoozeOpen] = useState(false);
 
 	const runAction = useCallback(async (action: BulkMessageAction) => {
 		setMoreOpen(false);
@@ -223,159 +225,182 @@ export function MessageActions({
 	const moveActions = getMoveMessageActions(status, direction);
 
 	return (
-		<div className="flex flex-wrap items-center justify-end gap-3 text-neutral-600">
+		<div className="flex flex-wrap items-center gap-3 text-neutral-600 flex-1 min-w-0">
 			{error && <span className="text-xs text-red-600">{error}</span>}
-			<div className="flex flex-wrap items-center justify-end gap-1 sm:gap-2">
-				<Tooltip label={shortcutsEnabled ? "Reply (r)" : "Reply"}>
+
+			<Tooltip label={shortcutsEnabled ? "Archive (e)" : "Archive"}>
+				<Button
+					variant="ghost"
+					size="roundedSM"
+					aria-label={shortcutsEnabled ? "Archive (e)" : "Archive"}
+					disabled={disabled || status === "archived"}
+					onClick={() => runAction("archive")}
+				>
+					<Archive size={iconSize} />
+				</Button>
+			</Tooltip>
+			<Tooltip label={shortcutsEnabled ? "Report spam (!)" : "Report spam"}>
+				<Button
+					variant="ghost"
+					size="roundedSM"
+					aria-label={shortcutsEnabled ? "Report spam (!)" : "Report spam"}
+					disabled={disabled || status === "spam" || direction !== "inbound"}
+					onClick={() => runAction("spam")}
+				>
+					<ShieldAlert size={iconSize} />
+				</Button>
+			</Tooltip>
+			<Tooltip label={shortcutsEnabled ? "Delete (#)" : "Delete"}>
+				<Button
+					variant="ghost"
+					size="roundedSM"
+					aria-label={shortcutsEnabled ? "Move to trash (#)" : "Move to trash"}
+					disabled={disabled || status === "trash"}
+					onClick={() => runAction("trash")}
+				>
+					<Trash2 size={iconSize} />
+				</Button>
+			</Tooltip>
+			<span className="h-5 mx-2 bg-gray-200 w-px inline-block" />
+
+
+			<Tooltip label={shortcutsEnabled ? "Reply (r)" : "Reply"}>
+				<Button
+					type="button"
+					variant="ghost"
+					size="roundedSM"
+					aria-label={shortcutsEnabled ? "Reply (r)" : "Reply"}
+					disabled={disabled}
+					onClick={() => handleReply("reply")}
+				>
+					<Reply size={iconSize} />
+				</Button>
+			</Tooltip>
+			{canReplyAll && (
+				<Tooltip label="Reply all">
 					<Button
 						type="button"
 						variant="ghost"
-						size="sm"
-						aria-label={shortcutsEnabled ? "Reply (r)" : "Reply"}
+						size="roundedSM"
+						aria-label="Reply all"
 						disabled={disabled}
-						onClick={() => handleReply("reply")}
+						onClick={() => handleReply("replyAll")}
 					>
-						<Reply size={18} />
+						<ReplyAll size={iconSize} />
 					</Button>
 				</Tooltip>
-				{canReplyAll && (
-					<Tooltip label="Reply all">
-						<Button
-							type="button"
-							variant="ghost"
-							size="sm"
-							aria-label="Reply all"
-							disabled={disabled}
-							onClick={() => handleReply("replyAll")}
-						>
-							<ReplyAll size={18} />
-						</Button>
-					</Tooltip>
-				)}
-				{message && messageMeta && (
-					<Tooltip label="Forward">
-						<Button
-							type="button"
-							variant="ghost"
-							size="sm"
-							aria-label="Forward"
-							disabled={disabled}
-							onClick={() => void handleForward()}
-						>
-							<Forward size={18} />
-						</Button>
-					</Tooltip>
-				)}
-				<Tooltip label={shortcutsEnabled ? "Archive (e)" : "Archive"}>
+			)}
+			{message && messageMeta && (
+				<Tooltip label="Forward">
 					<Button
+						type="button"
 						variant="ghost"
-						size="sm"
-						aria-label={shortcutsEnabled ? "Archive (e)" : "Archive"}
-						disabled={disabled || status === "archived"}
-						onClick={() => runAction("archive")}
-					>
-						<Archive size={18} />
-					</Button>
-				</Tooltip>
-				<Tooltip label={shortcutsEnabled ? "Report spam (!)" : "Report spam"}>
-					<Button
-						variant="ghost"
-						size="sm"
-						aria-label={shortcutsEnabled ? "Report spam (!)" : "Report spam"}
-						disabled={disabled || status === "spam" || direction !== "inbound"}
-						onClick={() => runAction("spam")}
-					>
-						<ShieldAlert size={18} />
-					</Button>
-				</Tooltip>
-				<Tooltip label={shortcutsEnabled ? "Delete (#)" : "Delete"}>
-					<Button
-						variant="ghost"
-						size="sm"
-						aria-label={shortcutsEnabled ? "Move to trash (#)" : "Move to trash"}
-						disabled={disabled || status === "trash"}
-						onClick={() => runAction("trash")}
-					>
-						<Trash2 size={18} />
-					</Button>
-				</Tooltip>
-				<Tooltip label={read ? "Mark as unread" : "Mark as read"}>
-					<Button
-						variant="ghost"
-						size="sm"
-						aria-label={read ? "Mark as unread" : "Mark as read"}
+						size="roundedSM"
+						aria-label="Forward"
 						disabled={disabled}
-						onClick={() => runAction(markAction)}
+						onClick={() => void handleForward()}
 					>
-						{read ? <Mail size={18} /> : <MailOpen size={18} />}
+						<Forward size={iconSize} />
 					</Button>
 				</Tooltip>
-				<div className="relative">
-					<Tooltip label="More actions">
-						<Button
-							type="button"
-							variant="ghost"
-							size="sm"
-							aria-label="More actions"
-							aria-expanded={moreOpen}
-							disabled={disabled}
-							onClick={() => setMoreOpen((open) => !open)}
-						>
-							<MoreVertical size={18} />
-						</Button>
-					</Tooltip>
-					{moreOpen && (
-						<div className="absolute right-0 z-20 mt-2 w-54 rounded-xl border border-neutral-200 bg-white p-2 shadow-lg">
-							{direction === "inbound" && (
-								<>
-									<button
-										type="button"
+			)}
+
+			<Tooltip label={read ? "Mark as unread" : "Mark as read"}>
+				<Button
+					variant="ghost"
+					size="roundedSM"
+					aria-label={read ? "Mark as unread" : "Mark as read"}
+					disabled={disabled}
+					onClick={() => runAction(markAction)}
+				>
+					{read ? <Mail size={iconSize} /> : <MailOpen size={iconSize} />}
+				</Button>
+			</Tooltip>
+			<div className="relative">
+				<Tooltip label="More actions">
+					<Button
+						type="button"
+						variant="ghost"
+						size="roundedSM"
+						aria-label="More actions"
+						aria-expanded={moreOpen}
+						disabled={disabled}
+						onClick={() => setMoreOpen((open) => !open)}
+					>
+						<MoreVertical size={iconSize} />
+					</Button>
+				</Tooltip>
+
+
+				{moreOpen && (
+					<div className="absolute right-0 top-8 z-20 w-54 rounded-xl border border-neutral-200 bg-white p-2 shadow-lg">
+						{direction === "inbound" && status === "received" && (
+							<button
+								type="button"
+								className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100"
+								onClick={() => { setMoreOpen(false); setSnoozeOpen(true); }}
+							>
+								<Clock className="h-4 w-4" />
+								Snooze
+							</button>
+						)}
+						{direction === "inbound" && (
+							<>
+								<button
+									type="button"
 									className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100 disabled:cursor-not-allowed disabled:text-neutral-400"
 									disabled={!unsubscribeUrl && status === "trash"}
 									onClick={() => void onUnsubscribe()}
 								>
 									<BellOff className="h-4 w-4 shrink-0" />
 									Unsubscribe
-									</button>
-									<button
-										type="button"
-									className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100"
-										onClick={() => void onBlockContact()}
-									>
-										<Ban className="h-4 w-4" />
-										Block contact
-									</button>
-							<hr className="my-1 border-neutral-100" />
-								</>
-							)}
-							<button
-								type="button"
-								className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100"
-								onClick={() => { setMoreOpen(false); setSourceOpen(true); }}
-							>
-								<FileCode2 className="h-4 w-4" />
-								Show original
-							</button>
-							<hr className="my-1 border-neutral-100" />
-							<p className="mt-1 px-3 pb-1 pt-2 text-sm font-medium text-neutral-500">
-								Move to
-							</p>
-							{moveActions.map((item) => (
+								</button>
 								<button
-									key={item.action}
 									type="button"
 									className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100"
-									onClick={() => void runAction(item.action)}
+									onClick={() => void onBlockContact()}
 								>
-									{createElement(item.icon, { size: 16 })}
-									{item.label}
+									<Ban className="h-4 w-4" />
+									Block contact
 								</button>
-							))}
-						</div>
-					)}
-				</div>
+								<hr className="my-1 border-neutral-100" />
+							</>
+						)}
+						<button
+							type="button"
+							className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100"
+							onClick={() => { setMoreOpen(false); setSourceOpen(true); }}
+						>
+							<FileCode2 className="h-4 w-4" />
+							Show original
+						</button>
+						<hr className="my-1 border-neutral-100" />
+						<p className="mt-1 px-3 pb-1 pt-2 text-sm font-medium text-neutral-500">
+							Move to
+						</p>
+						{moveActions.map((item) => (
+							<button
+								key={item.action}
+								type="button"
+								className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100"
+								onClick={() => void runAction(item.action)}
+							>
+								{createElement(item.icon, { size: 16 })}
+								{item.label}
+							</button>
+						))}
+					</div>
+				)}
+
 			</div>
+
 			<MessageSourceDialog messageId={messageId} open={sourceOpen} onOpenChange={setSourceOpen} />
+			<MessageSnoozeDialog messageId={messageId} open={snoozeOpen} onOpenChange={setSnoozeOpen} />
+
+			<span className="flex-1" />
 		</div>
 	);
 }
+
+
+const iconSize = 16;

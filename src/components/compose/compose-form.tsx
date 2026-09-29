@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DragEvent } from "react";
-import { FileText, Forward, Maximize2, Minimize2, Paperclip, Reply, Trash2, X } from "lucide-react";
+import { ChevronUp, FileText, Forward, Maximize2, Minimize2, Minus, Paperclip, Reply, Trash2, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -63,6 +63,7 @@ export function ComposeForm({
 	const [attachmentPolicy, setAttachmentPolicy] = useState<ComposeAttachmentPolicy>({ maxMb: 25, cloudThresholdBytes: 3_000_000 });
 	const [draggingFiles, setDraggingFiles] = useState(false);
 	const [modalMode, setModalMode] = useState(false);
+	const [minimized, setMinimized] = useState(false);
 	const [toast, setToast] = useState<Toast>(null);
 	const [loading, setLoading] = useState(false);
 	const [loadingDraft, setLoadingDraft] = useState(false);
@@ -488,15 +489,17 @@ export function ComposeForm({
 
 	const frameClass =
 		mode === "popup"
-			? modalMode
+			? minimized
+				? "fixed bottom-0 right-8 z-40 flex h-9 w-[min(260px,calc(100vw-32px))] flex-col overflow-hidden rounded-t-lg border border-neutral-200 bg-white shadow-2xl"
+				: modalMode
 				? "fixed left-1/2 top-1/2 z-50 flex h-[86vh] w-[min(860px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg bg-white shadow-2xl"
-				: "fixed bottom-4 right-4 z-40 flex h-[min(520px,calc(100vh-88px))] w-[min(560px,calc(100vw-32px))] flex-col overflow-hidden rounded-lg border border-neutral-200 bg-white shadow-2xl"
+				: "fixed bottom-0 right-8 z-40 flex h-[min(520px,calc(100vh-88px))] w-[min(560px,calc(100vw-32px))] flex-col overflow-hidden rounded-t-lg border border-neutral-200 bg-white shadow-2xl"
 			: "relative flex h-full min-h-[720px] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-sm";
 
 	return (
 		<>
 			{agentReview && <SendReview approvalId={agentReview.approvalId} snapshot={agentReview.snapshot} onClose={() => setAgentReview(null)} onSent={() => { setAgentReview(null); if (onClose) onClose(); else router.push("/sent"); }} />}
-			{mode === "popup" && modalMode && <div className="fixed inset-0 z-40 bg-neutral-950/65" aria-hidden="true" />}
+			{mode === "popup" && modalMode && !minimized && <div className="fixed inset-0 z-40 bg-neutral-950/65" aria-hidden="true" />}
 			{toast && (
 				<div
 					className={cn(
@@ -507,14 +510,14 @@ export function ComposeForm({
 					{toast.message}
 				</div>
 			)}
-			<form onSubmit={onSubmit} className={frameClass} role={modalMode ? "dialog" : undefined} aria-modal={modalMode || undefined} aria-label={modalMode ? "Compose message" : undefined} onKeyDown={(event) => { if (modalMode && event.key === "Escape") { event.preventDefault(); setModalMode(false); } }} onDragEnterCapture={onFileDragEnter} onDragOverCapture={onFileDragOver} onDragLeaveCapture={onFileDragLeave} onDropCapture={onFileDrop}>
-				{draggingFiles && (
+			<form onSubmit={onSubmit} className={frameClass} role={modalMode && !minimized ? "dialog" : undefined} aria-modal={modalMode && !minimized || undefined} aria-label={modalMode && !minimized ? "Compose message" : undefined} onKeyDown={(event) => { if (modalMode && !minimized && event.key === "Escape") { event.preventDefault(); setModalMode(false); } }} onDragEnterCapture={minimized ? undefined : onFileDragEnter} onDragOverCapture={minimized ? undefined : onFileDragOver} onDragLeaveCapture={minimized ? undefined : onFileDragLeave} onDropCapture={minimized ? undefined : onFileDrop}>
+				{draggingFiles && !minimized && (
 					<div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center border-2 border-dashed border-blue-400 bg-blue-50/90 text-sm font-medium text-blue-700" aria-hidden="true">
 						Drop files to attach
 					</div>
 				)}
-				<div className="flex h-9 items-center justify-between bg-neutral-800 px-4 text-sm font-medium text-white">
-					<span className="flex items-center gap-2">
+				<div className="flex h-9 shrink-0 items-center justify-between bg-neutral-800 px-4 text-sm font-medium text-white">
+					<span className="flex min-w-0 items-center gap-2 truncate">
 						{threading?.inReplyTo && <Reply className="h-3.5 w-3.5 text-neutral-300" />}
 						{!threading?.inReplyTo && /^fwd?:/i.test(subject) && <Forward className="h-3.5 w-3.5 text-neutral-300" />}
 						{loadingDraft
@@ -528,8 +531,11 @@ export function ComposeForm({
 										: "New Message"}
 					</span>
 					{mode === "popup" && (
-						<div className="flex items-center gap-3 text-neutral-300">
-							<button type="button" onClick={() => setModalMode((current) => !current)} aria-label={modalMode ? "Restore floating composer" : "Open composer as modal"} title={modalMode ? "Restore floating composer" : "Open composer as modal"} className="rounded p-1 hover:bg-neutral-700 hover:text-white">
+						<div className="flex shrink-0 items-center gap-3 text-neutral-300">
+							<button type="button" onClick={() => { setMinimized((current) => !current); setDraggingFiles(false); }} aria-label={minimized ? "Restore composer" : "Minimize composer"} title={minimized ? "Restore composer" : "Minimize composer"} className="rounded p-1 hover:bg-neutral-700 hover:text-white">
+								{minimized ? <ChevronUp className="h-4 w-4" /> : <Minus className="h-4 w-4" />}
+							</button>
+							<button type="button" onClick={() => { if (minimized) setMinimized(false); setModalMode((current) => !current); }} aria-label={modalMode ? "Restore floating composer" : "Open composer as modal"} title={modalMode ? "Restore floating composer" : "Open composer as modal"} className="rounded p-1 hover:bg-neutral-700 hover:text-white">
 								{modalMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
 							</button>
 							<button type="button" onClick={onClose} aria-label="Close composer" className="rounded p-1 hover:bg-neutral-700 hover:text-white">
@@ -538,6 +544,7 @@ export function ComposeForm({
 						</div>
 					)}
 				</div>
+				<div className={cn("flex min-h-0 flex-1 flex-col", minimized && "hidden")}>
 				<div className="border-b border-neutral-100 px-4 py-1 flex flex-row items-center">
 					<Label htmlFor={`${mode}-from`} className="text-sm text-neutral-500">From</Label>
 					<Select
@@ -677,6 +684,7 @@ export function ComposeForm({
 						</>
 					}
 				/>
+				</div>
 			</form>
 		</>
 	);

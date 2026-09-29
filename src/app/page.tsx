@@ -1,45 +1,35 @@
-"use client";
-
+import type { Metadata } from "next";
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { authFetch, getClientSessionToken } from "@/lib/auth/client";
-import { getHomeActions, heroMessages, sidebarItems } from "./utils";
-import { ArrowRight, Inbox, Mail, Search, ShieldCheck } from "lucide-react";
-import { useBranding } from "@/components/branding-provider";
+import { heroMessages, sidebarItems } from "./utils";
+import { Inbox, Mail, Search, ShieldCheck } from "lucide-react";
+import { getHomeBranding } from "./home-server-utils";
+import { HomeAuthProvider } from "./home-auth";
+import { HomeHeaderActions } from "./home-header-actions";
+import { HomeHeroActions } from "./home-hero-actions";
 
-export default function HomePage() {
-  const branding = useBranding();
-  const [hasUser, setHasUser] = useState(false);
+export const dynamic = "force-dynamic";
 
-  useEffect(() => {
-    let cancelled = false;
-    if (!getClientSessionToken()) return;
+export async function generateMetadata(): Promise<Metadata> {
+  const branding = await getHomeBranding();
+  return {
+    title: branding.appName,
+    icons: { icon: branding.hasCustomIcon ? "/api/branding/icon" : "/icon-96.png" },
+  };
+}
 
-    authFetch("/api/auth/me", { redirectOnUnauthorized: false })
-      .then((response) => {
-        if (!cancelled) setHasUser(response.ok);
-      })
-      .catch(() => {
-        if (!cancelled) setHasUser(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const actions = getHomeActions(hasUser);
+export default async function HomePage() {
+  const branding = await getHomeBranding();
 
   return (
+    <HomeAuthProvider>
     <div className="min-h-dvh bg-[#f6f8fc] text-neutral-900">
       <header className="mx-auto flex h-16 w-full max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
         <Link
           href="/"
           className="flex items-center gap-3"
-          aria-label="Email Platform home"
+          aria-label={`${branding.appName} home`}
         >
-          <img src={branding.iconUrl} height={32} width={32} alt="" />
+          <img src={branding.hasCustomIcon ? "/api/branding/icon" : "/icon-96.png"} height={32} width={32} alt="" />
           <span className="text-base font-semibold tracking-tight">
             {branding.appName}
           </span>
@@ -54,11 +44,7 @@ export default function HomePage() {
 				</nav> */}
 
         <div className="flex items-center gap-2">
-          {actions.map((action) => (
-            <Button key={action.href} variant={action.variant} asChild>
-              <Link href={action.href}>{action.label}</Link>
-            </Button>
-          ))}
+          <HomeHeaderActions />
         </div>
       </header>
 
@@ -76,24 +62,7 @@ export default function HomePage() {
               Add domains, route inbound mail, send through API keys, and manage
               your mailboxes from one quiet workspace built around the message list.
             </p>
-            <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-              <Button size="lg" asChild className="rounded-full px-6">
-                <Link href={actions.at(-1)?.href ?? "/setup"}>
-                  {hasUser ? "Open dashboard" : "Create account"}
-                  <ArrowRight className="h-4 w-4" />
-                </Link>
-              </Button>
-              <Button
-                size="lg"
-                variant="outline"
-                asChild
-                className="rounded-full border-neutral-200 bg-white px-6"
-              >
-                <Link href={hasUser ? "/inbox" : "/login"}>
-                  {hasUser ? "View inbox" : "Log in"}
-                </Link>
-              </Button>
-            </div>
+            <HomeHeroActions />
           </div>
 
           <div className="relative min-h-[520px] overflow-hidden rounded-[2rem] border border-white bg-white shadow-[0_24px_70px_-45px_rgba(30,64,175,0.55)]">
@@ -221,5 +190,6 @@ export default function HomePage() {
 				</section> */}
       </main>
     </div>
+    </HomeAuthProvider>
   );
 }

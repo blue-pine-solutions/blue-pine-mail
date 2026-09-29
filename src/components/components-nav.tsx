@@ -41,9 +41,9 @@ export function NavItem({ link }: { link: NavLink }) {
   if (!Icon) return null;
   const active = pathname === link.href || pathname.startsWith(`${link.href}/`);
   const classes = cn(
-    "flex h-9 items-center gap-3 rounded-r-full text-sm font-medium text-neutral-700 transition-colors hover:bg-blue-50",
+    "flex h-9 items-center gap-3 rounded-r-full text-sm font-medium text-neutral-700 transition-colors",
     minimal && "relative mx-auto w-10 justify-center rounded-full px-0",
-    active && "bg-blue-100 text-blue-900",
+    active ? "bg-blue-100 text-blue-900" : "hover:bg-stone-200/60",
     dragOver && "bg-blue-50 text-blue-900 ring-1 ring-blue-200",
     link.primary &&
       "mb-3 h-12 w-fit rounded-2xl bg-blue-100 px-5 text-blue-950 shadow-sm hover:bg-blue-200",
@@ -80,7 +80,7 @@ export function NavItem({ link }: { link: NavLink }) {
         size={21}
           style={{ color: link.iconColor }}
         />
-        {!minimal && <span className="flex-1">{link.label}</span>}
+        {!minimal && <span className={cn("flex-1", typeof link.count === "number" && link.count > 0 && "font-semibold")}>{link.label}</span>}
         {!minimal && typeof link.count === "number" && link.count > 0 && (
           <span className="ml-auto mr-3 rounded-full px-2 py-0.5 text-sm font-semibold text-neutral-700">
             {link.count > 99 ? "99+" : link.count}
@@ -142,7 +142,7 @@ export function NavItem({ link }: { link: NavLink }) {
           style={{ color: link.iconColor }}
           size={18}
         />
-        {!minimal && <span className="flex-1">{link.label}</span>}
+        {!minimal && <span className={cn("flex-1", typeof link.count === "number" && link.count > 0 && "font-semibold")}>{link.label}</span>}
         {!minimal && typeof link.count === "number" && link.count > 0 && (
           <span className="ml-auto mr-3 rounded-full px-2 py-0.5 text-sm font-semibold text-neutral-700">
             {link.count > 99 ? "99+" : link.count}
