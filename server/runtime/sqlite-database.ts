@@ -52,13 +52,18 @@ class SqlitePreparedStatement {
 		return (column ? row[column] : row) as T;
 	}
 
-	async run<T = Row>() {
+	/** Run now, synchronously; `run()`/`all()` and `batch()` share it. */
+	execute<T = Row>() {
 		if (this.isRead()) {
 			const results = this.statement().all(...this.params) as T[];
 			return { results, success: true as const, meta: meta() };
 		}
 		const info = this.statement().run(...this.params);
 		return { results: [] as T[], success: true as const, meta: meta(info) };
+	}
+
+	async run<T = Row>() {
+		return this.execute<T>();
 	}
 
 	async all<T = Row>() {
@@ -94,18 +99,13 @@ export class SqliteDatabase {
 		return new SqlitePreparedStatement(this.db, sql);
 	}
 
-	/** Run statements atomically, like D1's batch. */
+	/**
+	 * Run statements atomically, like D1's batch. The whole transaction runs synchronously,
+	 * with no await between BEGIN and COMMIT, so no other caller's query can run inside it
+	 * (and be committed or rolled back with it) and no other batch can find it open.
+	 */
 	async batch<T = Row>(statements: SqlitePreparedStatement[]) {
-		const results: Awaited<ReturnType<SqlitePreparedStatement["all"]>>[] = [];
-		this.db.exec("BEGIN");
-		try {
-			for (const statement of statements) results.push(await statement.all<T>());
-			this.db.exec("COMMIT");
-		} catch (error) {
-			this.db.exec("ROLLBACK");
-			throw error;
-		}
-		return results;
+		return this.db.transaction(() => statements.map((statement) => statement.execute<T>()))();
 	}
 
 	async exec(sql: string) {

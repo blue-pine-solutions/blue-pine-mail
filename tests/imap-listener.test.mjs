@@ -327,7 +327,7 @@ test("gate7: an end-to-end session over TLS", async (t) => {
 	assertTagged(await client.command("STORE 1 +FLAGS (\\Seen)"), "NO", /read-only/);
 	const select = await client.command("SELECT INBOX");
 	assertTagged(select, "OK", /\[READ-WRITE\]/);
-	assert.ok(select.untagged.some((unit) => unit.text === "* OK [PERMANENTFLAGS (\\Seen \\Flagged)] Flags permitted"));
+	assert.ok(select.untagged.some((unit) => unit.text === "* OK [PERMANENTFLAGS (\\Seen \\Flagged \\Deleted)] Flags permitted"));
 	const stored = await client.command("STORE 1 +FLAGS (\\Flagged)");
 	assertTagged(stored, "OK");
 	assert.deepEqual(stored.untagged.map((unit) => unit.text), ["* 1 FETCH (FLAGS (\\Flagged))"]);
@@ -423,8 +423,16 @@ test("gate7: curl IMAPS interoperates", { skip: !tryCommand("curl") && "curl is 
 	const store = await curl("/INBOX", ["--request", "STORE 1 +FLAGS (\\Flagged)"]);
 	assert.equal(store.status, 0, store.stderr);
 	assert.match(store.stdout, /^\* 1 FETCH \(FLAGS \(\\Seen \\Flagged\)\)/m, "curl's STORE changes the flag and sees the result");
-	const refused = await curl("/INBOX", ["--request", "STORE 1 +FLAGS (\\Deleted)"]);
-	assert.notEqual(refused.status, 0, "curl reports the refused \\Deleted");
+	// A5.2a: \Deleted and a recoverable EXPUNGE, through curl's custom requests.
+	const marked = await curl("/INBOX", ["--request", "STORE 1 +FLAGS (\\Deleted)"]);
+	assert.equal(marked.status, 0, marked.stderr);
+	assert.match(marked.stdout, /^\* 1 FETCH \(FLAGS \(\\Seen \\Flagged \\Deleted\)\)/m);
+	const expunged = await curl("/INBOX", ["--request", "EXPUNGE"]);
+	assert.equal(expunged.status, 0, expunged.stderr);
+	assert.match(expunged.stdout, /^\* 1 EXPUNGE\r?$/m);
+	assert.match((await curl("/Trash", ["--request", "SEARCH ALL"])).stdout, /^\* SEARCH 1\r?$/m, "the expunged message is in Trash, not deleted");
+	const refused = await curl("/Trash", ["--request", "STORE 1 +FLAGS (\\Deleted)"]);
+	assert.notEqual(refused.status, 0, "curl reports the refused \\Deleted in Trash");
 });
 
 test("gate7: openssl s_client sees implicit TLS and the greeting", { skip: !tryCommand("openssl") && "openssl is not installed" }, async (t) => {

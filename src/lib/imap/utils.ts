@@ -24,8 +24,26 @@ export const IN_LIST_CHUNK = 90;
 /** UIDs per storeImapFlags statement, leaving room under IN_LIST_CHUNK for the membership and value parameters. */
 export const FLAG_STORE_CHUNK = 80;
 
-/** Flags a STORE may change. \Deleted is not among them yet. */
-export const STORABLE_FLAGS: readonly ImapFlagName[] = ["seen", "flagged"];
+/** Flags a STORE may name and this server keeps. Which of them a principal may change where is ImapMailbox.permanentFlags. */
+export const STORABLE_FLAGS: readonly ImapFlagName[] = ["seen", "flagged", "deleted"];
+
+/** UIDs per relocation batch (expungeImapFolder), leaving room under IN_LIST_CHUNK for the other parameters. */
+export const RELOCATION_CHUNK = 80;
+
+/**
+ * The bp0003 trigger that clears a message's pending \Deleted marks whenever its folder
+ * membership changes. \Deleted and EXPUNGE are only offered while it exists.
+ */
+export const DELETED_INVARIANT_TRIGGER = "bp_imap_membership_clears_deleted";
+
+/**
+ * Folders whose EXPUNGE is recoverable: \Deleted messages move to Trash. Expunging Trash or
+ * Drafts would delete permanently, which this server does not do yet, so \Deleted cannot
+ * be set there.
+ */
+export function isRecoverablyExpungeable(key: ImapFolderKey): boolean {
+	return key !== "trash" && key !== "drafts";
+}
 
 export class ImapStateError extends Error {
 	constructor(readonly code: ImapStateErrorCode, message: string) {

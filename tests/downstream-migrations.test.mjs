@@ -21,7 +21,15 @@ const DOWNSTREAM_NAME = /^bp(\d{4})_[a-z0-9_]+\.sql$/;
 const upstreamFiles = files.filter((name) => UPSTREAM_NAME.test(name));
 const downstreamFiles = files.filter((name) => DOWNSTREAM_NAME.test(name)).sort();
 /** Upstream tables Blue Pine migrations attach foreign keys or triggers to. */
-const ANCHORED_UPSTREAM_TABLES = ["users", "mailboxes", "domains", "mailbox_access"];
+const ANCHORED_UPSTREAM_TABLES = ["users", "mailboxes", "domains", "mailbox_access", "messages"];
+/**
+ * Anchored tables where only the named, certified Blue Pine triggers may attach, and no
+ * foreign key may (UPSTREAM.md, "IMAP \Deleted invariant (bp0003)"). Anything else on these
+ * tables needs its own certification and an entry here first.
+ */
+const CERTIFIED_ONLY = { messages: ["bp_imap_membership_clears_deleted"] };
+/** The exact certified bp0003 trigger, as SQLite stores it. */
+const MEMBERSHIP_TRIGGER_SQL = "CREATE TRIGGER `bp_imap_membership_clears_deleted` AFTER UPDATE OF `mailbox_id`, `status`, `folder_id` ON `messages`\nWHEN OLD.`mailbox_id` IS NOT NEW.`mailbox_id` OR OLD.`status` IS NOT NEW.`status` OR OLD.`folder_id` IS NOT NEW.`folder_id`\nBEGIN\n\tUPDATE `imap_message_uids` SET `deleted` = 0 WHERE `message_id` = NEW.`id` AND `deleted` = 1;\nEND";
 const downstreamTables = [...read("src/db/schema/bluepine.ts").matchAll(/sqliteTable\(\s*"([^"]+)"/g)].map((match) => match[1]);
 
 const generated = spawnSync(process.execPath, [join(root, "scripts", "generate-migration-bundle.mjs")], { encoding: "utf8" });
@@ -108,15 +116,26 @@ test("Blue Pine migrations only create their own objects and never alter or drop
 });
 
 test("Blue Pine migrations attach triggers and foreign keys only to the anchored upstream tables", () => {
-	// IMAP state (bp0002) deliberately has neither on `messages` or `folders`, which it reads by join.
+	// IMAP state (bp0002) reads `messages` and `folders` by join; the only attachment to
+	// `messages` is bp0003's certified \Deleted invariant, and nothing attaches to `folders`.
 	for (const name of downstreamFiles) {
 		const sql = readFileSync(join(migrationsDirectory, name), "utf8").replace(/--[^\n]*/g, "");
-		const targets = [
-			...[...sql.matchAll(/\bCREATE\s+TRIGGER\s+[`"]?\w+[`"]?[^;]*?\bON\s+[`"]?(\w+)/gi)].map((match) => match[1]),
-			...[...sql.matchAll(/\bREFERENCES\s+[`"]?(\w+)/gi)].map((match) => match[1]),
-		];
-		for (const table of targets) assert.ok(downstreamTables.includes(table) || ANCHORED_UPSTREAM_TABLES.includes(table), `${name} attaches to upstream table ${table}; add it to ANCHORED_UPSTREAM_TABLES and UPSTREAM.md first`);
+		const triggers = [...sql.matchAll(/\bCREATE\s+TRIGGER\s+[`"]?(\w+)[`"]?[^;]*?\bON\s+[`"]?(\w+)/gi)].map((match) => ({ trigger: match[1], table: match[2] }));
+		const references = [...sql.matchAll(/\bREFERENCES\s+[`"]?(\w+)/gi)].map((match) => match[1]);
+		for (const table of [...triggers.map((item) => item.table), ...references]) assert.ok(downstreamTables.includes(table) || ANCHORED_UPSTREAM_TABLES.includes(table), `${name} attaches to upstream table ${table}; add it to ANCHORED_UPSTREAM_TABLES and UPSTREAM.md first`);
+		for (const { trigger, table } of triggers) {
+			if (CERTIFIED_ONLY[table]) assert.ok(CERTIFIED_ONLY[table].includes(trigger), `${name}: trigger ${trigger} on ${table} is not a certified Blue Pine attachment`);
+		}
+		for (const table of references) assert.ok(!CERTIFIED_ONLY[table], `${name}: no Blue Pine foreign key may reference ${table}`);
 	}
+});
+
+test("bp0003's trigger on messages is exactly the certified \\Deleted invariant, and it is the only Blue Pine object on messages", async (t) => {
+	const database = openDatabase(t);
+	await app.applyMigrations(database, migrationsDirectory);
+	const onMessages = database.db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'messages' AND name LIKE 'bp\\_%' ESCAPE '\\'").all();
+	assert.deepEqual(onMessages, [{ name: "bp_imap_membership_clears_deleted", sql: MEMBERSHIP_TRIGGER_SQL }]);
+	assert.equal(database.db.prepare("SELECT COUNT(*) AS n FROM pragma_foreign_key_list('imap_message_uids') WHERE \"table\" = 'messages'").get().n, 0, "imap_message_uids has no foreign key to messages");
 });
 
 test("no upstream migration drops or renames a table Blue Pine attaches foreign keys or triggers to", () => {
@@ -186,6 +205,7 @@ test("a migrated database has the Blue Pine table, indexes and triggers, and eve
 	for (const table of downstreamTables) assert.ok(names("table").includes(table), table);
 	assert.deepEqual(names("trigger").filter((name) => name.startsWith("bp_")), [
 		"bp_imap_folders_monotonic",
+		"bp_imap_membership_clears_deleted",
 		"bp_imap_message_uids_advance_uid_next",
 		"bp_imap_message_uids_immutable",
 		"bp_mail_app_passwords_revoke_on_access_removal",

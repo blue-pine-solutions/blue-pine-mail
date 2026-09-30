@@ -1,4 +1,4 @@
-import type { ImapFlags, ImapFolderKey, ImapMessageEntry, ImapPrincipal } from "@/lib/imap/types";
+import type { ImapFlagName, ImapFlags, ImapFolderKey, ImapMessageEntry, ImapPrincipal } from "@/lib/imap/types";
 
 /** One piece of a framed command: a line fragment (bytes as latin1 text) or a literal's octets. */
 export type CommandPart = { kind: "text"; text: string } | { kind: "literal"; bytes: Uint8Array };
@@ -69,8 +69,10 @@ export type SessionPrincipal = Required<Pick<ImapPrincipal, "userId" | "mailboxI
 export type SelectedMailbox = {
 	key: ImapFolderKey;
 	name: string;
-	/** EXAMINE, or a SELECT with nothing the principal may change: no STORE and no implicit \Seen. */
+	/** EXAMINE, or a SELECT with nothing the principal may change: no STORE, no implicit \Seen, no expunge. */
 	readOnly: boolean;
+	/** The flags STORE may change here (A3's permanent flags under SELECT; none under EXAMINE). */
+	permanentFlags: ImapFlagName[];
 	uidValidity: number;
 	uidNext: number;
 	/** UIDs by sequence number (index + 1). */

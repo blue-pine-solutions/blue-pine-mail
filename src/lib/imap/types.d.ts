@@ -46,9 +46,13 @@ export type ImapMailbox = {
 	specialUse: ImapSpecialUse | null;
 	folderId: string | null;
 	selectable: true;
-	/** Flags a client with this access may change on messages here. */
+	/**
+	 * Flags a client with this access may change on messages here: \Seen and \Flagged for
+	 * anyone who can read, plus \Deleted with management access in folders whose expunge is
+	 * recoverable (not Trash or Drafts) while the bp0003 invariant is installed.
+	 */
 	permanentFlags: ImapFlagName[];
-	/** Future write operations (append, move, copy, expunge) need management access, as in the web app. */
+	/** Write operations (expunge; later append, move, copy) need management access, as in the web app. */
 	mayWrite: boolean;
 	mayRename: boolean;
 	mayDelete: boolean;
@@ -93,10 +97,11 @@ export type ImapMessageContent = {
 export type ImapFlagChanges = Partial<Record<ImapFlagName, boolean>>;
 
 /**
- * A STORE-style flag change for many UIDs (storeImapFlags). `replace` sets every flag it can
- * change to whether it is listed, `add` sets the listed flags and `remove` clears them.
- * Only \Seen and \Flagged can change; naming `deleted` is refused (`denied` without
- * management access, `unsupported` with it).
+ * A STORE-style flag change for many UIDs (storeImapFlags). `replace` sets every flag the
+ * principal may change in the folder (ImapMailbox.permanentFlags) to whether it is listed,
+ * `add` sets the listed flags and `remove` clears them. Naming `deleted` where it cannot
+ * change refuses the whole change (`denied` without management access, `unsupported` in
+ * Trash, in Drafts or without the bp0003 invariant).
  */
 export type ImapFlagStore = { mode: "replace" | "add" | "remove"; flags: ImapFlagName[] };
 

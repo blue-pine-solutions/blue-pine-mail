@@ -195,11 +195,12 @@ test("an upgraded A2 mailbox gets deterministic UIDs on first read, and restarts
 	t.after(() => rmSync(a2Migrations, { recursive: true, force: true }));
 	cpSync(migrationsDirectory, a2Migrations, { recursive: true });
 	rmSync(join(a2Migrations, "bp0002_add_imap_mailbox_state.sql"));
+	rmSync(join(a2Migrations, "bp0003_clear_imap_deleted_on_membership_change.sql"));
 	const directory = mkdtempSync(join(tmpdir(), "mailflare-imap-upgrade-"));
 	const first = await install(t, { migrations: a2Migrations, directory });
 	for (const [id, createdAt] of [["m-c", 300], ["m-a", 100], ["m-b2", 200], ["m-b1", 200], ["m-d", 400]]) insertMessage(first.database, { id, created_at: createdAt });
 	insertMessage(first.database, { id: "s-1", direction: "outbound", status: "sent", created_at: 150 });
-	assert.deepEqual(await app.applyMigrations(first.database, migrationsDirectory), ["bp0002_add_imap_mailbox_state.sql"], "the upgrade applies only bp0002");
+	assert.deepEqual(await app.applyMigrations(first.database, migrationsDirectory), ["bp0002_add_imap_mailbox_state.sql", "bp0003_clear_imap_deleted_on_membership_change.sql"], "the upgrade applies only bp0002 and bp0003");
 	assert.equal(first.database.db.prepare("SELECT COUNT(*) AS n FROM imap_message_uids").get().n, 0, "the migration itself assigns nothing");
 
 	const inbox = await imap.openImapFolder(first.env, owner, "inbox");
@@ -459,9 +460,10 @@ test("shared mailboxes: every authorized user sees the same state, rights follow
 	for (const user of ["user-a", "user-b", "user-c", "user-d"]) views[user] = await imap.openImapFolder(env, salesAs(user), "inbox");
 	for (const user of ["user-b", "user-c", "user-d"]) assert.deepEqual([views[user].uidValidity, listing(views[user])], [views["user-a"].uidValidity, listing(views["user-a"])], user);
 
-	// Read-only: may read and change seen/flagged (as in the web app), not \Deleted.
+	// Read-only: may read and change seen/flagged (as in the web app), not \Deleted. Lacking a
+	// permission is `denied` (the session goes on), never `forbidden` (access revoked).
 	assert.equal((await imap.setImapMessageFlags(env, salesAs("user-b"), "inbox", 1, { seen: true })).seen, true);
-	await rejectsWith(imap.setImapMessageFlags(env, salesAs("user-b"), "inbox", 1, { deleted: true }), "forbidden");
+	await rejectsWith(imap.setImapMessageFlags(env, salesAs("user-b"), "inbox", 1, { deleted: true }), "denied");
 	assert.equal((await imap.setImapMessageFlags(env, salesAs("user-d"), "inbox", 1, { deleted: true })).deleted, true);
 
 	// Bcc policy: read access to a mailbox includes its complete Sent copies, as in /original, the message API and JMAP.

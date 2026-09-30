@@ -273,7 +273,7 @@ test("gate3: SELECT opens the folder read-write and EXAMINE read-only, with A3's
 		assert.equal(result.tagged, `${result.tagged.split(" ")[0]} OK [${writable ? "READ-WRITE" : "READ-ONLY"}] ${command} completed`);
 		assert.deepEqual(texts(result), [
 			"* FLAGS (\\Seen \\Flagged \\Deleted \\Draft)",
-			writable ? "* OK [PERMANENTFLAGS (\\Seen \\Flagged)] Flags permitted" : "* OK [PERMANENTFLAGS ()] Read-only mailbox",
+			writable ? "* OK [PERMANENTFLAGS (\\Seen \\Flagged \\Deleted)] Flags permitted" : "* OK [PERMANENTFLAGS ()] Read-only mailbox",
 			"* 3 EXISTS",
 			"* 0 RECENT",
 			"* OK [UNSEEN 1] First unseen message",
@@ -342,7 +342,7 @@ test("gate3: a UIDVALIDITY change or a vanished selected folder ends the session
 	assert.equal(gone.untagged.at(-1).text, "* BYE Selected mailbox no longer exists");
 });
 
-test("gate3: every mutating command other than STORE is refused without touching A3 or product state", async (t) => {
+test("gate3: every mutating command other than STORE, EXPUNGE and CLOSE is refused without touching A3 or product state", async (t) => {
 	const context = await loggedIn(t);
 	await context.deliver("m-1", "Subject: x\r\n\r\nx\r\n");
 	await context.client.command("SELECT INBOX");
@@ -353,9 +353,8 @@ test("gate3: every mutating command other than STORE is refused without touching
 		context.database.db.prepare("SELECT id, name FROM folders ORDER BY id").all(),
 	]);
 	const before = state();
-	// STORE is certified in imap-flags.test.mjs; \Deleted is the one flag it refuses, unchanged.
-	assertTagged(await context.client.command("UID STORE 1 +FLAGS.SILENT (\\Deleted)"), "NO", /\[CANNOT\]/);
-	for (const command of ["COPY 1 Trash", "UID COPY 1 Trash", "EXPUNGE", 'CREATE "New"', "DELETE Work", "RENAME Work Play", "SUBSCRIBE Work", "UNSUBSCRIBE Work"]) {
+	// STORE is certified in imap-flags.test.mjs, EXPUNGE and CLOSE in imap-expunge.test.mjs.
+	for (const command of ["COPY 1 Trash", "UID COPY 1 Trash", 'CREATE "New"', "DELETE Work", "RENAME Work Play", "SUBSCRIBE Work", "UNSUBSCRIBE Work"]) {
 		assertTagged(await context.client.command(command), "NO", /\[CANNOT\] .* not available on this server/);
 	}
 	context.client.write("ap APPEND INBOX (\\Seen) {12}\r\n");

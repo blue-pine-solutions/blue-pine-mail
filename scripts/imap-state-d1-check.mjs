@@ -2,8 +2,8 @@
  * Certification of the A3 IMAP state layer on the Workers runtime: bundles
  * src/lib/imap/ into a Worker, runs it in workerd (Miniflare) with real D1 and R2
  * bindings, and exercises migrations, concurrent first access and delivery, deletion,
- * canonical bytes, batched flag writes (A5.1), the database guards, backup/restore and a
- * restart.
+ * canonical bytes, batched flag writes (A5.1), bp0003's \Deleted invariant, \Deleted and
+ * recoverable EXPUNGE (A5.2a), the database guards, backup/restore and a restart.
  *
  *   node scripts/imap-state-d1-check.mjs
  *
@@ -120,8 +120,10 @@ try {
 	console.log("Migrations (Workers runner on D1)");
 	const migrated = await op("migrate");
 	const migrationFiles = readdirSync(join(root, "drizzle", "migrations")).filter((name) => name.endsWith(".sql"));
-	check("every migration applies, bp0002 last", migrated.ready && migrated.applied.length === migrationFiles.length && migrated.applied.at(-1) === "bp0002_add_imap_mailbox_state.sql", migrated);
-	check(`${migrationFiles.length} migrations: ${migrationFiles.filter((name) => /^\d/.test(name)).length} upstream + ${migrationFiles.filter((name) => name.startsWith("bp")).length} Blue Pine`, migrationFiles.length === 50 && migrationFiles.filter((name) => name.startsWith("bp")).length === 2);
+	check("every migration applies, bp0003 last", migrated.ready && migrated.applied.length === migrationFiles.length && migrated.applied.at(-1) === "bp0003_clear_imap_deleted_on_membership_change.sql", migrated);
+	check(`${migrationFiles.length} migrations: ${migrationFiles.filter((name) => /^\d/.test(name)).length} upstream + ${migrationFiles.filter((name) => name.startsWith("bp")).length} Blue Pine`, migrationFiles.length === 51 && migrationFiles.filter((name) => name.startsWith("bp")).length === 3);
+	const onMessages = (await sql(["SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'messages' AND name LIKE 'bp%'"]))[0];
+	check("bp0003's trigger is the only Blue Pine trigger on messages", onMessages.length === 1 && onMessages[0].name === "bp_imap_membership_clears_deleted" && /AFTER UPDATE OF `mailbox_id`, `status`, `folder_id` ON `messages`/.test(onMessages[0].sql), onMessages);
 	check("a second run applies nothing", (await op("migrate")).applied.length === 0);
 
 	await sql(
@@ -214,10 +216,99 @@ try {
 	const sentUid = await op("ensureImapUid", owner, "sent", "out-d1");
 	const unseenSent = await op("store", owner, "sent", [sentUid], { mode: "remove", flags: ["seen"] });
 	check("clearing \\Seen on outbound mail leaves it seen and unwritten", unseenSent[sentUid]?.seen === true && (await sql(["SELECT read FROM messages WHERE id = 'out-d1'"]))[0][0].read === 1, unseenSent);
-	check("\\Deleted with management access is unsupported", (await op("store", owner, "inbox", [one], { mode: "add", flags: ["deleted"] })).code === "unsupported");
 	await op("openImapFolder", { userId: "user-b", mailboxId: "mbx-s" }, "inbox");
 	check("\\Deleted for a read-only delegate is denied", (await op("store", { userId: "user-b", mailboxId: "mbx-s" }, "inbox", [1], { mode: "add", flags: ["deleted"] })).code === "denied");
 	check("\\Seen for a read-only delegate is allowed", typeof (await op("store", { userId: "user-b", mailboxId: "mbx-s" }, "inbox", [1], { mode: "add", flags: ["seen"] })).error === "undefined");
+
+	console.log("bp0003: \\Deleted cleared on membership change (D1)");
+	await sql(
+		["INSERT INTO folders (id, user_id, mailbox_id, name, created_at) VALUES ('fld-d1', 'user-a', 'mbx-a', 'D1 folder', 1)"],
+		["INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, status, created_at) VALUES ('t-1', 'user-a', 'mbx-a', 'inbound', 's@x', 'a@example.test', 'received', 9600)"],
+	);
+	const tUid = await op("ensureImapUid", owner, "inbox", "t-1");
+	const markT = () => op("store", owner, "inbox", [tUid], { mode: "add", flags: ["deleted"] });
+	const tDeleted = async () => (await sql(["SELECT u.deleted FROM imap_message_uids u JOIN imap_folders f ON f.id = u.imap_folder_id WHERE f.folder_key = 'inbox' AND f.mailbox_id = 'mbx-a' AND u.message_id = 't-1'"]))[0][0]?.deleted;
+	check("owner STORE +FLAGS \\Deleted sets it", (await markT())[tUid]?.deleted === true && (await tDeleted()) === 1);
+	await sql(["UPDATE messages SET read = 1 WHERE id = 't-1'"]);
+	check("a read change leaves \\Deleted", (await tDeleted()) === 1);
+	await sql(["UPDATE messages SET starred = 1 WHERE id = 't-1'"]);
+	check("a starred change leaves \\Deleted", (await tDeleted()) === 1);
+	await sql(["UPDATE messages SET status = 'archived' WHERE id = 't-1'"], ["UPDATE messages SET status = 'received' WHERE id = 't-1'"]);
+	check("leaving INBOX and returning before any IMAP sync does not resurrect \\Deleted", (await tDeleted()) === 0 && (await op("resolveImapUid", owner, "inbox", tUid))?.flags?.deleted === false);
+	await markT();
+	await sql(["UPDATE messages SET status = 'spam' WHERE id = 't-1'"]);
+	check("a status change clears \\Deleted", (await tDeleted()) === 0);
+	await sql(["UPDATE messages SET status = 'received' WHERE id = 't-1'"]);
+	await markT();
+	await sql(["UPDATE messages SET folder_id = 'fld-d1' WHERE id = 't-1'"]);
+	check("a direct move to a custom folder clears \\Deleted", (await tDeleted()) === 0);
+	const fUid = await op("ensureImapUid", owner, "f:fld-d1", "t-1");
+	await op("store", owner, "f:fld-d1", [fUid], { mode: "add", flags: ["deleted"] });
+	await sql(["DELETE FROM folders WHERE id = 'fld-d1'"]);
+	const fDeleted = (await sql(["SELECT u.deleted FROM imap_message_uids u JOIN imap_folders f ON f.id = u.imap_folder_id WHERE f.folder_key = 'f:fld-d1' AND u.message_id = 't-1'"]))[0][0]?.deleted;
+	check("deleting the custom folder (foreign key sets folder_id NULL) clears \\Deleted", fDeleted === 0 && (await sql(["SELECT folder_id FROM messages WHERE id = 't-1'"]))[0][0].folder_id === null, fDeleted);
+	await markT();
+	await sql(["UPDATE messages SET mailbox_id = 'mbx-s' WHERE id = 't-1'"], ["UPDATE messages SET mailbox_id = 'mbx-a' WHERE id = 't-1'"]);
+	check("a mailbox change clears \\Deleted", (await tDeleted()) === 0);
+
+	console.log("\\Deleted and recoverable EXPUNGE (A5.2a, D1)");
+	check("owner may set \\Deleted in INBOX, not in Trash or Drafts", (await op("listImapMailboxes", owner)).every((mailbox) => mailbox.permanentFlags.includes("deleted") === !["trash", "drafts"].includes(mailbox.key)));
+	await op("openImapFolder", owner, "trash");
+	check("\\Deleted in Trash is unsupported", (await op("store", owner, "trash", [1], { mode: "add", flags: ["deleted"] })).code === "unsupported");
+	check("EXPUNGE in Trash is unsupported", (await op("expungeImapFolder", owner, "trash", 1000)).code === "unsupported");
+	check("EXPUNGE for a read-only delegate is denied", (await op("expungeImapFolder", { userId: "user-b", mailboxId: "mbx-s" }, "inbox", 1000)).code === "denied");
+	await sql(["UPDATE messages SET read = 1, starred = 1 WHERE id = 'raw-1'"]);
+	await op("store", owner, "inbox", [rawUid], { mode: "add", flags: ["deleted"] });
+	const trashNextBefore = (await op("openImapFolder", owner, "trash")).uidNext;
+	const inboxBefore = await op("openImapFolder", owner, "inbox");
+	const moved = await op("expungeImapFolder", owner, "inbox", inboxBefore.uidNext - 1);
+	const rawRow = (await sql(["SELECT status, folder_id, read, starred, created_at, raw_r2_key FROM messages WHERE id = 'raw-1'"]))[0][0];
+	check("EXPUNGE moves exactly the \\Deleted message to Trash", same(moved, [rawUid]) && rawRow.status === "trash" && rawRow.folder_id === null, [moved, rawRow]);
+	check("read, starred, date and stored object are kept", rawRow.read === 1 && rawRow.starred === 1 && rawRow.created_at === 9000 && rawRow.raw_r2_key === "inbound/d1.eml" && !!(await bucket.get("inbound/d1.eml")));
+	const trashAfter = await op("openImapFolder", owner, "trash");
+	const trashEntry = trashAfter.messages.find((entry) => entry.messageId === "raw-1");
+	check("Trash UID from UIDNEXT, without \\Deleted", trashEntry?.uid === trashNextBefore && trashEntry.flags.deleted === false && trashAfter.uidNext === trashNextBefore + 1, trashEntry);
+	const trashFetch = await op("fetch", owner, "trash", trashEntry.uid);
+	check("canonical bytes and RFC822.SIZE unchanged in Trash", trashFetch?.sha === digest && trashFetch.size === bytes.byteLength, trashFetch);
+	check("a repeated EXPUNGE moves nothing", same(await op("expungeImapFolder", owner, "inbox", inboxBefore.uidNext - 1), []));
+	const concurrentIds = Array.from({ length: 12 }, (_, index) => `c-${index}`);
+	await sql(...concurrentIds.map((id) => [`INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, status, created_at) VALUES ('${id}', 'user-a', 'mbx-a', 'inbound', 's@x', 'a@example.test', 'received', 9700)`]));
+	const concurrentUids = [];
+	for (const id of concurrentIds) concurrentUids.push(await op("ensureImapUid", owner, "inbox", id));
+	await op("store", owner, "inbox", concurrentUids, { mode: "add", flags: ["deleted"] });
+	const maxUid = Math.max(...concurrentUids);
+	const racing = await Promise.all([op("expungeImapFolder", owner, "inbox", maxUid), op("expungeImapFolder", owner, "inbox", maxUid)]);
+	const trashRows = (await sql(["SELECT u.message_id, COUNT(*) AS n FROM imap_message_uids u JOIN imap_folders f ON f.id = u.imap_folder_id WHERE f.mailbox_id = 'mbx-a' AND f.folder_key = 'trash' AND u.message_id LIKE 'c-%' GROUP BY u.message_id"]))[0];
+	check("two concurrent EXPUNGEs move each message exactly once", racing.every(Array.isArray) && trashRows.length === 12 && trashRows.every((row) => row.n === 1) && (await sql(["SELECT COUNT(*) AS n FROM messages WHERE id LIKE 'c-%' AND status = 'trash'"]))[0][0].n === 12, racing);
+	// Full chunks: 90 UIDs are two STORE chunks and two relocation batches (80 + 10), each statement within D1's 100 bound parameters.
+	await sql(["WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 89) INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, status, created_at) SELECT printf('k-%02d', i), 'user-a', 'mbx-a', 'inbound', 's@x', 'a@example.test', 'received', 9750 FROM n"]);
+	const bigInbox = await op("openImapFolder", owner, "inbox");
+	const bigUids = bigInbox.messages.filter((entry) => entry.messageId.startsWith("k-")).map((entry) => entry.uid);
+	const bigStore = await op("store", owner, "inbox", bigUids, { mode: "add", flags: ["seen", "deleted"] });
+	check("STORE +FLAGS (\\Seen \\Deleted) over 90 UIDs (two chunks) on D1", bigUids.length === 90 && bigUids.every((uid) => bigStore[uid]?.deleted === true && bigStore[uid]?.seen === true), bigStore.error ?? bigUids.length);
+	const bigTrashBefore = (await op("openImapFolder", owner, "trash")).uidNext;
+	const bigMoved = await op("expungeImapFolder", owner, "inbox", Math.max(...bigUids));
+	const bigTrash = await op("openImapFolder", owner, "trash");
+	const bigTrashUids = bigTrash.messages.filter((entry) => entry.messageId.startsWith("k-")).map((entry) => entry.uid);
+	check("EXPUNGE of 90 UIDs (relocation batches of 80 and 10) on D1", same(bigMoved, bigUids) && bigTrashUids.length === 90 && same(bigTrashUids, Array.from({ length: 90 }, (_, index) => bigTrashBefore + index)) && bigTrash.uidNext === bigTrashBefore + 90 && bigTrash.messages.every((entry) => !entry.flags.deleted), bigMoved.error ?? [bigMoved.length, bigTrashUids.length]);
+	await sql(["INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, status, created_at) VALUES ('x-1', 'user-a', 'mbx-a', 'inbound', 's@x', 'a@example.test', 'received', 9800)"]);
+	const xUid = await op("ensureImapUid", owner, "inbox", "x-1");
+	await op("store", owner, "inbox", [xUid], { mode: "add", flags: ["deleted"] });
+	const trashFolder = (await sql(["SELECT id, uid_next FROM imap_folders WHERE mailbox_id = 'mbx-a' AND folder_key = 'trash'"]))[0][0];
+	await sql(["UPDATE imap_folders SET uid_next = 4294967296 WHERE id = ?", trashFolder.id]);
+	const exhausted = await op("expungeImapFolder", owner, "inbox", xUid);
+	const xState = (await sql(["SELECT m.status, u.deleted FROM messages m JOIN imap_message_uids u ON u.message_id = m.id JOIN imap_folders f ON f.id = u.imap_folder_id WHERE m.id = 'x-1' AND f.folder_key = 'inbox'"]))[0];
+	check("an exhausted Trash UIDNEXT rolls the whole relocation back on D1", typeof exhausted.error === "string" && /CHECK constraint failed/.test(exhausted.error) && xState.length === 1 && xState[0].status === "received" && xState[0].deleted === 1, [exhausted, xState]);
+
+	console.log("Fail-closed without bp0003 (D1)");
+	const triggerSql = onMessages[0].sql;
+	await sql(["DROP TRIGGER bp_imap_membership_clears_deleted"]);
+	check("\\Deleted is not a permanent flag anywhere", (await op("listImapMailboxes", owner)).every((mailbox) => !mailbox.permanentFlags.includes("deleted")));
+	check("STORE \\Deleted is unsupported", (await op("store", owner, "inbox", [xUid], { mode: "remove", flags: ["deleted"] })).code === "unsupported");
+	check("EXPUNGE is unsupported and moves nothing", (await op("expungeImapFolder", owner, "inbox", xUid)).code === "unsupported" && (await sql(["SELECT status FROM messages WHERE id = 'x-1'"]))[0][0].status === "received");
+	check("\\Seen still works", (await op("store", owner, "inbox", [xUid], { mode: "add", flags: ["seen"] }))[xUid]?.seen === true);
+	await sql([triggerSql]);
+	check("the trigger is restored", (await op("listImapMailboxes", owner)).some((mailbox) => mailbox.permanentFlags.includes("deleted")));
 
 	console.log("Shared access and revocation");
 	check("read-only delegate can open the shared INBOX", !!(await op("openImapFolder", { userId: "user-b", mailboxId: "mbx-s" }, "inbox")).uidValidity);

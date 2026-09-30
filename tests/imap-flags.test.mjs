@@ -6,7 +6,7 @@ import { assertTagged, fetchAttributes, install, loadApp, memoryClient } from ".
  * A5.1: read-write selection and flags. SELECT opens a folder read-write for the flags the
  * principal may change (\Seen and \Flagged, which are the product's read and starred state),
  * EXAMINE read-only; STORE / UID STORE and the implicit \Seen of body fetches write through
- * A3's batched storeImapFlags. \Deleted stays unwritable. Driven in memory over the real A2
+ * A3's batched storeImapFlags. \Deleted (A5.2a) is certified in imap-expunge.test.mjs. Driven in memory over the real A2
  * verifier, A3 state and product routes (SQLite + file bucket).
  */
 const { app, cleanup } = await loadApp("imap-flags");
@@ -65,7 +65,7 @@ test("a5.1: SELECT is READ-WRITE with PERMANENTFLAGS (\\Seen \\Flagged); EXAMINE
 	const select = await context.client.command("SELECT INBOX");
 	assertTagged(select, "OK", /^\S+ OK \[READ-WRITE\] SELECT completed$/);
 	assert.ok(texts(select).includes("* FLAGS (\\Seen \\Flagged \\Deleted \\Draft)"), "FLAGS lists every flag a message can show");
-	assert.ok(texts(select).includes("* OK [PERMANENTFLAGS (\\Seen \\Flagged)] Flags permitted"), "\\Deleted is not permanent yet, and there is no \\*");
+	assert.ok(texts(select).includes("* OK [PERMANENTFLAGS (\\Seen \\Flagged \\Deleted)] Flags permitted"), "the owner may also set \\Deleted here (A5.2a), and there is no \\*");
 	const examine = await context.client.command("EXAMINE INBOX");
 	assertTagged(examine, "OK", /^\S+ OK \[READ-ONLY\] EXAMINE completed$/);
 	assert.ok(texts(examine).includes("* OK [PERMANENTFLAGS ()] Read-only mailbox"));
@@ -211,13 +211,13 @@ test("a5.1: \\Answered, \\Draft and keywords are accepted and not stored; \\Rece
 	assert.equal(context.row("d-1").status, "draft");
 });
 
-test("a5.1: \\Deleted is not writable: NO [NOPERM] without management access, NO [CANNOT] with it, and the session goes on", async (t) => {
+test("a5.1/a5.2a: \\Deleted where it cannot change: NO [CANNOT] in Trash for the owner, NO [NOPERM] without management access, and the session goes on", async (t) => {
 	const owner = await setup(t);
-	await deliverMany(owner, ["m-1"]);
-	await owner.client.command("SELECT INBOX");
+	await deliverMany(owner, ["m-1"], { status: "trash" });
+	await owner.client.command("SELECT Trash");
 	const before = productState(owner);
 	for (const command of ["STORE 1 +FLAGS (\\Deleted)", "STORE 1 FLAGS (\\Seen \\Deleted)", "UID STORE 1 -FLAGS.SILENT (\\Deleted)", "STORE 1 +FLAGS (\\Seen \\Deleted)"]) {
-		assertTagged(await owner.client.command(command), "NO", /\[CANNOT\] \\Deleted cannot be changed on this server/, command);
+		assertTagged(await owner.client.command(command), "NO", /\[CANNOT\] Messages in Trash and Drafts cannot be marked deleted on this server yet/, command);
 	}
 	assert.equal(productState(owner), before, "a refused STORE writes nothing, not even the \\Seen it also named");
 	assertTagged(await owner.client.command("NOOP"), "OK");
