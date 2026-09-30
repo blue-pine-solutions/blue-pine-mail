@@ -31,6 +31,9 @@ import * as imap from "./src/lib/imap/service.ts";
 import * as state from "./src/lib/imap/state.ts";
 import * as spam from "./src/lib/spam/feedback.ts";
 import { cleanupDeletedMessageObjects } from "./src/lib/imap/cleanup.ts";
+import * as folderManagement from "./src/lib/mailboxes/folder-management.ts";
+import { sql as drizzleSql } from "drizzle-orm";
+import { SQLiteAsyncDialect } from "drizzle-orm/sqlite-core";
 import { getDb } from "./src/db/index.ts";
 import { applyPendingMigrations } from "./src/lib/migrations/service.ts";
 import { exportDatabaseRecords, restoreDatabaseRecords } from "./src/lib/backups/export.ts";
@@ -93,6 +96,13 @@ export default {
 				}
 			}
 			if (op === "cleanup") return Response.json(await cleanupDeletedMessageObjects(env, getDb(env), args[0]));
+			if (op.startsWith("folders.")) return Response.json(await folderManagement[op.slice("folders.".length)](getDb(env), ...args));
+			if (op === "folderGuard") {
+				// R-1's in-SQL management authority, evaluated on D1 as the guarded writes embed it.
+				const [actor, mailboxId] = args;
+				const query = new SQLiteAsyncDialect().sqlToQuery(drizzleSql\`SELECT CASE WHEN \${folderManagement.managementGuard(actor, mailboxId)} THEN 1 ELSE 0 END AS allowed\`);
+				return Response.json((await env.DB.prepare(query.sql).bind(...query.params).first()).allowed === 1);
+			}
 			if (op === "applySpamFeedback") return Response.json(await spam.applySpamFeedback(env, ...args));
 			if (op === "recordSpamTraining") return Response.json(await spam.recordSpamTraining(env, ...args));
 			if (op === "roundTrip") {
@@ -651,6 +661,45 @@ try {
 	await sql(["UPDATE users SET disabled = 1 WHERE id = 'user-a'"]);
 	check("a disabled user is forbidden", (await op("getImapChangeSignal", owner, "inbox")).code === "forbidden");
 	await sql(["UPDATE users SET disabled = 0 WHERE id = 'user-a'"]);
+
+	console.log("Folder management (R-1, D1)");
+	await sql(
+		["INSERT INTO mailboxes (id, user_id, domain_id, local_part, type, created_at) VALUES ('mbx-r', 'user-a', 'domain-1', 'r1', 'shared', 1)"],
+		["INSERT INTO mailbox_access (id, mailbox_id, user_id, permission, created_at) VALUES ('acc-r', 'mbx-r', 'user-b', 'read_only', 1)"],
+		["INSERT INTO folders (id, user_id, mailbox_id, name, created_at) VALUES ('fld-r', 'user-a', 'mbx-r', 'Kept', 1), ('fld-r2', 'user-a', 'mbx-r', 'Snoozed only', 1)"],
+		["INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, status, folder_id, created_at) VALUES ('r-1', 'user-a', 'mbx-r', 'inbound', 's@x', 'r1@example.test', 'received', 'fld-r', 40000)"],
+		["INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, status, folder_id, snoozed_until, created_at) VALUES ('r-z', 'user-a', 'mbx-r', 'inbound', 's@x', 'r1@example.test', 'received', 'fld-r2', 1999999999, 40001)"],
+	);
+	const rOwner = { userId: "user-a" };
+	const rDelegate = { userId: "user-b" };
+	const rCreated = await op("folders.createFolder", rOwner, "mbx-r", "  Made on D1  ");
+	check("the owner creates a folder through the guarded insert (trimmed)", rCreated.outcome === "ok" && (await sql(["SELECT name FROM folders WHERE id = ?", rCreated.folderId]))[0][0]?.name === "Made on D1", rCreated);
+	check("an exact duplicate is alreadyExists; a control character is invalidName", (await op("folders.createFolder", rOwner, "mbx-r", "Made on D1")).outcome === "alreadyExists" && (await op("folders.createFolder", rOwner, "mbx-r", "A\nB")).outcome === "invalidName");
+	check("a read_only delegate may not rename or delete", (await op("folders.renameFolder", rDelegate, "mbx-r", "fld-r", "X")).outcome === "forbidden" && (await op("folders.deleteFolder", rDelegate, "mbx-r", rCreated.folderId, {})).outcome === "forbidden");
+	await sql(["UPDATE mailbox_access SET permission = 'full_access' WHERE id = 'acc-r'"]);
+	check("a full_access delegate renames through the guarded update", (await op("folders.renameFolder", rDelegate, "mbx-r", "fld-r", "Renamed on D1")).outcome === "ok" && (await sql(["SELECT name FROM folders WHERE id = 'fld-r'"]))[0][0].name === "Renamed on D1");
+	check("a folder of another mailbox is notFound and nothing moves", (await op("folders.deleteFolder", rOwner, "mbx-a", "fld-r", { removeMessages: true })).outcome === "notFound" && (await sql(["SELECT status, folder_id FROM messages WHERE id = 'r-1'"]))[0][0].folder_id === "fld-r");
+	check("a folder holding only snoozed mail is not empty", (await op("folders.deleteFolder", rOwner, "mbx-r", "fld-r2", {})).outcome === "hasMessages" && (await sql(["SELECT folder_id FROM messages WHERE id = 'r-z'"]))[0][0].folder_id === "fld-r2");
+	const rRemoved = await op("folders.deleteFolder", rOwner, "mbx-r", "fld-r", { removeMessages: true });
+	const rMessage = (await sql(["SELECT status, folder_id FROM messages WHERE id = 'r-1'"]))[0][0];
+	check("removeMessages moves the folder's mail to Trash and deletes it in one D1 batch", same(rRemoved, { outcome: "ok", movedToTrash: 1 }) && rMessage.status === "trash" && rMessage.folder_id === null && (await sql(["SELECT COUNT(*) AS n FROM folders WHERE id = 'fld-r'"]))[0][0].n === 0, [rRemoved, rMessage]);
+	check("an empty folder is deleted", same(await op("folders.deleteFolder", rOwner, "mbx-r", rCreated.folderId, {}), { outcome: "ok", movedToTrash: 0 }));
+	// The in-SQL guard itself, evaluated by D1 (JSON scope check included).
+	await sql(["UPDATE mailbox_access SET permission = 'read_only' WHERE id = 'acc-r'"]);
+	check("guard: owner yes, read_only delegate no", (await op("folderGuard", rOwner, "mbx-r")) === true && (await op("folderGuard", rDelegate, "mbx-r")) === false);
+	await sql(["UPDATE mailbox_access SET permission = 'full_access' WHERE id = 'acc-r'"]);
+	check("guard: full_access delegate yes", (await op("folderGuard", rDelegate, "mbx-r")) === true);
+	await sql(["UPDATE mailboxes SET disabled = 1 WHERE id = 'mbx-r'"]);
+	check("guard: a disabled mailbox no", (await op("folderGuard", rOwner, "mbx-r")) === false);
+	await sql(["UPDATE mailboxes SET disabled = 0 WHERE id = 'mbx-r'"], ["UPDATE users SET disabled = 1 WHERE id = 'user-b'"]);
+	check("guard: a disabled user no", (await op("folderGuard", rDelegate, "mbx-r")) === false);
+	await sql(["UPDATE users SET disabled = 0 WHERE id = 'user-b'"]);
+	const rCredential = { userId: "user-a", appPasswordId: "map-p" };
+	check("guard: a mail app password with the imap scope yes, for its own mailbox only", (await op("folderGuard", rCredential, "mbx-p")) === true && (await op("folderGuard", rCredential, "mbx-r")) === false);
+	await sql(["UPDATE mail_app_passwords SET scopes = '[\"smtp\"]' WHERE id = 'map-p'"]);
+	check("guard: without the imap scope no (json_each on D1)", (await op("folderGuard", rCredential, "mbx-p")) === false);
+	await sql(["UPDATE mail_app_passwords SET scopes = '[\"imap\"]' WHERE id = 'map-p'"]);
+	check("a credential actor creates a folder in its own mailbox", (await op("folders.createFolder", rCredential, "mbx-p", "Via credential")).outcome === "ok");
 
 	console.log("bp0004 upgrade of an existing D1 database (Workers runner)");
 	const draftTriggers = (await sql(["SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'bp_imap_draft_%' ORDER BY name"]))[0];

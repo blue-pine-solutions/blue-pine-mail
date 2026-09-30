@@ -49,6 +49,7 @@ export async function loadApp(name) {
 				export { cleanupDeletedMessageObjects } from "./src/lib/imap/cleanup.ts";
 				export * as imapState from "./src/lib/imap/state.ts";
 				export * as imapUtils from "./src/lib/imap/utils.ts";
+				export * as folderManagement from "./src/lib/mailboxes/folder-management.ts";
 				export { getDb } from "./src/db/index.ts";
 				export { default as PostalMime } from "postal-mime";
 			`,

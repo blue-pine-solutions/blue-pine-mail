@@ -1,6 +1,6 @@
-import { and, count, eq, inArray, isNull, sql } from "drizzle-orm";
-import { folders, messages } from "@/db/schema";
-import { newId } from "@/lib/ids";
+import { count, inArray, sql } from "drizzle-orm";
+import { messages } from "@/db/schema";
+import { createFolder, deleteFolder, findFolder, renameFolder } from "@/lib/mailboxes/folder-management";
 import { JmapError } from "./errors";
 import { decodeMailboxRef, encodeMailboxRef, roleToStatus, SYSTEM_ROLES } from "./ids";
 import { getMailboxState } from "./state";
@@ -180,11 +180,23 @@ export const mailboxChanges: JmapMethodHandler = async () => {
 	return { type: "cannotCalculateChanges", description: "Mailbox change history is not kept; run Mailbox/get again." };
 };
 
-/** Folders can be created, renamed and removed; system mailboxes cannot. */
+const MANAGE_FORBIDDEN = { type: "forbidden", description: "This access does not allow managing folders" };
+const NAME_INVALID = { type: "invalidProperties", properties: ["name"], description: "A folder name is 1 to 80 characters without control characters" };
+const NAME_TAKEN = { type: "invalidProperties", properties: ["name"], description: "A folder with that name already exists" };
+
+/**
+ * Folders can be created, renamed and removed; system mailboxes and the mailbox itself cannot.
+ * Every folder change goes through the shared folder-management service (R-1), which decides
+ * management authority (owner or full_access delegate), re-checks it inside the database write,
+ * and only ever touches a folder verified to belong to the mailbox named in the id, so a folder id
+ * from another mailbox is `notFound` and nothing is reported as done unless it was done.
+ * Mailboxes that are not visible to this key (listJmapMailboxes) are `notFound` before that.
+ */
 export const mailboxSet: JmapMethodHandler = async (ctx, args) => {
 	const oldState = await getMailboxState(ctx);
 	if (args.ifInState && args.ifInState !== oldState) return { type: "stateMismatch" };
 	const accessible = await listJmapMailboxes(ctx);
+	const actor = { userId: ctx.auth.userId };
 	const created: Record<string, unknown> = {};
 	const notCreated: Record<string, unknown> = {};
 	const updated: Record<string, null> = {};
@@ -194,24 +206,21 @@ export const mailboxSet: JmapMethodHandler = async (ctx, args) => {
 
 	for (const [creationId, value] of Object.entries((args.create ?? {}) as Record<string, Record<string, unknown>>)) {
 		const parent = typeof value.parentId === "string" ? decodeMailboxRef(value.parentId) : null;
-		const name = typeof value.name === "string" ? value.name.trim() : "";
 		const mailbox = parent && accessible.find((row) => row.id === parent.mailboxId);
-		if (!parent || parent.kind !== "account" || !mailbox || mailbox.permission !== "full_access") {
+		if (!parent || parent.kind !== "account" || !mailbox) {
 			notCreated[creationId] = { type: "invalidProperties", properties: ["parentId"], description: "Folders live directly under a mailbox" };
 			continue;
 		}
-		if (!name || name.length > 80) {
-			notCreated[creationId] = { type: "invalidProperties", properties: ["name"] };
+		const result = await createFolder(ctx.db, actor, mailbox.id, value.name);
+		if (result.outcome !== "ok") {
+			notCreated[creationId] =
+				result.outcome === "forbidden" ? MANAGE_FORBIDDEN
+				: result.outcome === "invalidName" ? NAME_INVALID
+				: result.outcome === "alreadyExists" ? NAME_TAKEN
+				: { type: "invalidProperties", properties: ["parentId"], description: "Folders live directly under a mailbox" };
 			continue;
 		}
-		const id = newId("fld");
-		try {
-			await ctx.db.insert(folders).values({ id, userId: mailbox.userId, mailboxId: mailbox.id, name });
-		} catch {
-			notCreated[creationId] = { type: "invalidProperties", properties: ["name"], description: "A folder with that name already exists" };
-			continue;
-		}
-		const jmapId = encodeMailboxRef({ kind: "folder", mailboxId: mailbox.id, folderId: id });
+		const jmapId = encodeMailboxRef({ kind: "folder", mailboxId: mailbox.id, folderId: result.folderId });
 		ctx.createdIds[creationId] = jmapId;
 		created[creationId] = { id: jmapId, role: null, sortOrder: 0, totalEmails: 0, unreadEmails: 0, totalThreads: 0, unreadThreads: 0, isSubscribed: true };
 	}
@@ -225,21 +234,26 @@ export const mailboxSet: JmapMethodHandler = async (ctx, args) => {
 		}
 		const keys = Object.keys(patch).filter((key) => key !== "isSubscribed" && key !== "sortOrder");
 		if (ref.kind !== "folder") {
-			notUpdated[id] = keys.length ? { type: "forbidden", description: "System mailboxes cannot be changed" } : undefined!;
-			if (!keys.length) updated[id] = null;
+			if (keys.length) notUpdated[id] = { type: "forbidden", description: "System mailboxes cannot be changed" };
+			else updated[id] = null;
 			continue;
 		}
 		if (keys.some((key) => key !== "name")) {
 			notUpdated[id] = { type: "invalidProperties", properties: keys.filter((key) => key !== "name") };
 			continue;
 		}
-		if (typeof patch.name === "string" && patch.name.trim()) {
-			await ctx.db
-				.update(folders)
-				.set({ name: patch.name.trim() })
-				.where(and(eq(folders.id, ref.folderId), eq(folders.mailboxId, mailbox.id)));
+		if (!keys.length) {
+			// Only properties this server does not keep: nothing to write, but the folder must exist.
+			if (await findFolder(ctx.db, mailbox.id, ref.folderId)) updated[id] = null;
+			else notUpdated[id] = { type: "notFound" };
+			continue;
 		}
-		updated[id] = null;
+		const result = await renameFolder(ctx.db, actor, mailbox.id, ref.folderId, patch.name);
+		if (result.outcome === "ok" || result.outcome === "unchanged") updated[id] = null;
+		else if (result.outcome === "forbidden") notUpdated[id] = MANAGE_FORBIDDEN;
+		else if (result.outcome === "invalidName") notUpdated[id] = NAME_INVALID;
+		else if (result.outcome === "alreadyExists") notUpdated[id] = NAME_TAKEN;
+		else notUpdated[id] = { type: "notFound" };
 	}
 
 	for (const id of (args.destroy ?? []) as string[]) {
@@ -249,21 +263,15 @@ export const mailboxSet: JmapMethodHandler = async (ctx, args) => {
 			notDestroyed[id] = { type: "notFound" };
 			continue;
 		}
-		if (ref.kind !== "folder" || mailbox.permission !== "full_access") {
+		if (ref.kind !== "folder") {
 			notDestroyed[id] = { type: "forbidden" };
 			continue;
 		}
-		if (args.onDestroyRemoveEmails) {
-			await ctx.db.update(messages).set({ status: "trash", folderId: null }).where(eq(messages.folderId, ref.folderId));
-		} else {
-			const [inUse] = await ctx.db.select({ n: count() }).from(messages).where(and(eq(messages.folderId, ref.folderId), isNull(messages.snoozedUntil)));
-			if ((inUse?.n ?? 0) > 0) {
-				notDestroyed[id] = { type: "mailboxHasEmail" };
-				continue;
-			}
-		}
-		await ctx.db.delete(folders).where(and(eq(folders.id, ref.folderId), eq(folders.mailboxId, mailbox.id)));
-		destroyed.push(id);
+		const result = await deleteFolder(ctx.db, actor, mailbox.id, ref.folderId, { removeMessages: args.onDestroyRemoveEmails === true });
+		if (result.outcome === "ok") destroyed.push(id);
+		else if (result.outcome === "forbidden") notDestroyed[id] = MANAGE_FORBIDDEN;
+		else if (result.outcome === "hasMessages") notDestroyed[id] = { type: "mailboxHasEmail" };
+		else notDestroyed[id] = { type: "notFound" };
 	}
 
 	return {
