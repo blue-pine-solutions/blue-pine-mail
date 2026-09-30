@@ -7,15 +7,15 @@ import { imapFolders, imapMessageUids } from "@/db/schema/bluepine";
 import { draftFingerprint } from "@/lib/email/canonical-message-utils";
 import { newId } from "@/lib/ids";
 import type { ImapFolderKey } from "./types";
-import { chunk, DELETED_INVARIANT_TRIGGER, IN_LIST_CHUNK, nowSeconds, parseFolderKey, UID_ASSIGNMENT_CHUNK } from "./utils";
+import { chunk, D1_MAX_BOUND_PARAMETERS, DELETED_INVARIANT_TRIGGER, DRAFT_INVARIANT_TRIGGERS, IN_LIST_CHUNK, nowSeconds, parseFolderKey, PERMANENT_DELETE_CHUNK, UID_ASSIGNMENT_CHUNK } from "./utils";
 
 /**
  * Storage mechanics behind src/lib/imap/service.ts. Every write here is a single SQL
  * statement, so it is atomic on D1 and on the Node SQLite wrapper without relying on
  * batches: UID assignment is one INSERT … SELECT whose UIDNEXT bump happens in the
- * bp_imap_message_uids_advance_uid_next trigger, inside the same statement. The one
- * exception is relocateImapMessages, one batch (a transaction on both runtimes) whose
- * statements each carry their own guard.
+ * bp_imap_message_uids_advance_uid_next trigger, inside the same statement. The two
+ * exceptions are relocateImapMessages and deleteImapMessagesPermanently, each one batch (a
+ * transaction on both runtimes) whose statements each carry their own guard.
  *
  * Membership is never cached. A mapping row is kept only while its message is still a
  * member of the folder; any read that finds it otherwise deletes it (the message was
@@ -106,6 +106,22 @@ export async function syncFolder(db: AppDatabase, folder: ImapFolderRow, mailbox
 	if (key === "drafts") await bindDraftFingerprints(db, folder.id, member);
 }
 
+/**
+ * Release the Drafts UIDs that no longer name their draft's current content (or whose draft
+ * left Drafts), without assigning new ones. bp0004 releases a UID in the same statement as any
+ * edit made while it is installed; this catches drafts edited before it was, and is run before
+ * \Deleted is changed or acted on in Drafts.
+ */
+export async function releaseStaleDraftUids(db: AppDatabase, folder: ImapFolderRow, mailboxId: string): Promise<void> {
+	const member = membershipCondition(mailboxId, "drafts");
+	await db.run(sql`
+		DELETE FROM imap_message_uids
+		WHERE imap_folder_id = ${folder.id}
+			AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = imap_message_uids.message_id AND ${member})
+	`);
+	await bindDraftFingerprints(db, folder.id, member);
+}
+
 /** Current canonical draft fingerprints (A1's), keyed by message id. */
 export async function currentDraftFingerprints(db: AppDatabase, rows: Array<typeof messages.$inferSelect>): Promise<Map<string, string>> {
 	const attachmentsByMessage = new Map<string, Array<typeof messageAttachments.$inferSelect>>();
@@ -160,6 +176,22 @@ export const deletedInvariantInstalled: SQL = sql`EXISTS (SELECT 1 FROM sqlite_m
 /** Whether the bp0003 invariant is installed right now. Never cached: writes re-check it themselves. */
 export async function hasDeletedInvariant(db: AppDatabase): Promise<boolean> {
 	const row = await db.get<{ installed: number }>(sql`SELECT CASE WHEN ${deletedInvariantInstalled} THEN 1 ELSE 0 END AS installed`);
+	return Number(row?.installed) === 1;
+}
+
+/**
+ * "The bp0004 invariant is installed": every trigger that releases a draft's Drafts UID when
+ * its fingerprinted content changes exists on its table. Carried inside every write that sets
+ * \Deleted in Drafts or deletes a draft permanently, like deletedInvariantInstalled.
+ */
+export const draftInvariantInstalled: SQL = sql`(SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND (${sql.join(
+	DRAFT_INVARIANT_TRIGGERS.map((trigger) => sql`(name = ${trigger.name} AND tbl_name = ${trigger.table})`),
+	sql` OR `,
+)})) = ${DRAFT_INVARIANT_TRIGGERS.length}`;
+
+/** Whether the bp0004 invariant is installed right now. Never cached. */
+export async function hasDraftInvariant(db: AppDatabase): Promise<boolean> {
+	const row = await db.get<{ installed: number }>(sql`SELECT CASE WHEN ${draftInvariantInstalled} THEN 1 ELSE 0 END AS installed`);
 	return Number(row?.installed) === 1;
 }
 
@@ -269,4 +301,120 @@ export async function relocateImapMessages(
 	const movedIds = new Set((updated.results as Array<{ id: string }>).map((row) => String(row.id)));
 	const releasedRows = (released.results as Array<{ uid: number; message_id: string }>).map((row) => ({ uid: Number(row.uid), messageId: String(row.message_id) })).sort((a, b) => a.uid - b.uid);
 	return { released: releasedRows.map((row) => row.uid), moved: releasedRows.filter((row) => movedIds.has(row.messageId)) };
+}
+
+/**
+ * Who a permanent deletion acts for, re-checked inside the deleting statement itself so that a
+ * credential, account or mailbox access revoked after the application-level authorization
+ * (authorizeImapAccess) still stops it: the user exists and is enabled; the mail app password
+ * (when named) still exists for this user and mailbox; the mailbox exists and is enabled; and
+ * the user owns it or, while mailbox sharing is enabled (`sharedAccess`), still holds
+ * `full_access` to it as a shared mailbox. The `imap` scope is checked by authorizeImapAccess.
+ */
+export type ImapDeletionAuthority = { userId: string; mailboxId: string; appPasswordId?: string; sharedAccess: boolean };
+
+function authorityGuard(authority: ImapDeletionAuthority): SQL {
+	const { userId, mailboxId } = authority;
+	const credential = authority.appPasswordId === undefined
+		? sql``
+		: sql`AND EXISTS (SELECT 1 FROM mail_app_passwords WHERE mail_app_passwords.id = ${authority.appPasswordId} AND mail_app_passwords.user_id = ${userId} AND mail_app_passwords.mailbox_id = ${mailboxId})`;
+	const delegated = authority.sharedAccess
+		? sql`OR (mailboxes.type = 'shared' AND EXISTS (SELECT 1 FROM mailbox_access WHERE mailbox_access.mailbox_id = mailboxes.id AND mailbox_access.user_id = ${userId} AND mailbox_access.permission = 'full_access'))`
+		: sql``;
+	return sql`
+		EXISTS (SELECT 1 FROM users WHERE users.id = ${userId} AND users.disabled = 0)
+		${credential}
+		AND EXISTS (SELECT 1 FROM mailboxes WHERE mailboxes.id = ${mailboxId} AND mailboxes.disabled = 0 AND (mailboxes.user_id = ${userId} ${delegated}))
+	`;
+}
+
+export type ImapPermanentDeletion = {
+	/** Source UIDs released by this batch: their message is gone from the folder (deleted here or earlier, or moved away). */
+	released: number[];
+	/** Messages this batch deleted, with the source UID that named each and the stored keys it referenced. */
+	deleted: Array<{ uid: number; messageId: string; rawKey: string | null; attachmentKeys: string[] }>;
+};
+
+/**
+ * Permanently delete the messages that `uids` name in Trash or Drafts (A5.2c), as one atomic
+ * batch (a transaction on D1 and on the Node SQLite wrapper). Nothing in object storage is
+ * touched here: the caller removes stored bytes only after this has committed
+ * (cleanupDeletedMessageObjects), so a failure or a crash never leaves a live row without them.
+ *
+ * A message is deleted only if, when the batch runs: it is in `mailboxId` with the folder's
+ * status (`trash` or `draft`); the exact source UID naming it is one of `uids`, at most
+ * `maxUid`, and marked \Deleted; the folder row is this mailbox's Trash or Drafts; bp0003 is
+ * installed; `authority` still holds (authorityGuard); and in Drafts, the draft's author is
+ * `authority.userId` and bp0004 is installed. The statements:
+ *
+ * 1. Capture the attachment keys of the messages the guard selects. Attachment rows cascade
+ *    with the message, and a RETURNING clause sees the table after the cascade, so they are
+ *    read here, in the same transaction, immediately before the delete.
+ * 2. The guarded DELETE, RETURNING the id and raw key of each message it deleted: exactly the
+ *    messages this operation deleted. Cascades and triggers do the rest (attachments, spam
+ *    feedback, agent rows, the full-text index, JMAP revisions).
+ * 3. `imap_message_uids` has no foreign key to `messages`, so every mapping of a message named
+ *    by these UIDs that no longer exists is removed, in any folder but this one.
+ * 4. Release of every source UID whose message is no longer in the folder, RETURNING it.
+ *
+ * Only attachment keys of messages step 2 deleted are returned. A failed statement rolls the
+ * whole batch back. Deletion never assigns a UID or touches UIDNEXT.
+ */
+export async function deleteImapMessagesPermanently(
+	db: AppDatabase,
+	source: ImapRelocationEnd,
+	uids: number[],
+	maxUid: number,
+	authority: ImapDeletionAuthority,
+): Promise<ImapPermanentDeletion> {
+	if (source.key !== "trash" && source.key !== "drafts") throw new Error(`Permanent deletion is not allowed in ${source.key}`);
+	if (!uids.length) return { released: [], deleted: [] };
+	if (uids.length > PERMANENT_DELETE_CHUNK) throw new Error("Too many UIDs for one permanent deletion");
+	const { mailboxId } = authority;
+	const inSource = membershipCondition(mailboxId, source.key);
+	const uidList = sql.join(uids.map((uid) => sql`${uid}`), sql`, `);
+	const draftGuards = source.key === "drafts" ? sql`AND messages.user_id = ${authority.userId} AND ${draftInvariantInstalled}` : sql``;
+	const guard = sql`
+		${inSource}
+		AND messages.id IN (SELECT message_id FROM imap_message_uids WHERE imap_folder_id = ${source.folder.id} AND uid IN (${uidList}) AND uid <= ${maxUid} AND deleted = 1)
+		AND EXISTS (SELECT 1 FROM imap_folders WHERE imap_folders.id = ${source.folder.id} AND imap_folders.mailbox_id = ${mailboxId} AND imap_folders.folder_key = ${source.key})
+		${draftGuards}
+		AND ${deletedInvariantInstalled}
+		AND ${authorityGuard(authority)}
+	`;
+	const statements = [
+		sql`SELECT message_attachments.message_id AS message_id, message_attachments.r2_key AS r2_key FROM message_attachments WHERE message_attachments.message_id IN (SELECT messages.id FROM messages WHERE ${guard})`,
+		sql`DELETE FROM messages WHERE ${guard} RETURNING id, raw_r2_key`,
+		sql`
+			DELETE FROM imap_message_uids
+			WHERE imap_folder_id <> ${source.folder.id}
+				AND message_id IN (SELECT named.message_id FROM imap_message_uids AS named WHERE named.imap_folder_id = ${source.folder.id} AND named.uid IN (${uidList}))
+				AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = imap_message_uids.message_id)
+		`,
+		sql`
+			DELETE FROM imap_message_uids
+			WHERE imap_folder_id = ${source.folder.id} AND uid IN (${uidList})
+				AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = imap_message_uids.message_id AND ${inSource})
+			RETURNING uid, message_id
+		`,
+	];
+	for (const statement of statements) {
+		const { params } = dialect.sqlToQuery(statement);
+		if (params.length >= D1_MAX_BOUND_PARAMETERS) throw new Error(`A permanent-deletion statement would bind ${params.length} parameters`);
+	}
+	const [captured, deletedRows, , released] = await batchSql(db, statements);
+	const deletedIds = new Map((deletedRows.results as Array<{ id: string; raw_r2_key: string | null }>).map((row) => [String(row.id), row.raw_r2_key === null ? null : String(row.raw_r2_key)]));
+	const attachmentKeys = new Map<string, string[]>();
+	for (const row of captured.results as Array<{ message_id: string; r2_key: string }>) {
+		const messageId = String(row.message_id);
+		if (!deletedIds.has(messageId)) continue;
+		attachmentKeys.set(messageId, [...(attachmentKeys.get(messageId) ?? []), String(row.r2_key)]);
+	}
+	const releasedRows = (released.results as Array<{ uid: number; message_id: string }>).map((row) => ({ uid: Number(row.uid), messageId: String(row.message_id) })).sort((a, b) => a.uid - b.uid);
+	return {
+		released: releasedRows.map((row) => row.uid),
+		deleted: releasedRows
+			.filter((row) => deletedIds.has(row.messageId))
+			.map((row) => ({ uid: row.uid, messageId: row.messageId, rawKey: deletedIds.get(row.messageId) ?? null, attachmentKeys: attachmentKeys.get(row.messageId) ?? [] })),
+	};
 }

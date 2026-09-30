@@ -31,18 +31,41 @@ export const STORABLE_FLAGS: readonly ImapFlagName[] = ["seen", "flagged", "dele
 export const RELOCATION_CHUNK = 80;
 
 /**
+ * UIDs per permanent-deletion batch (A5.2c). Smaller than RELOCATION_CHUNK: each statement
+ * also carries the in-SQL authorization and invariant guards (about 20 more bound parameters,
+ * D1 allows 100), and deleting a message re-tokenizes its bodies for the full-text index and
+ * cascades into several tables inside the same D1 statement, so the work per batch is bounded.
+ */
+export const PERMANENT_DELETE_CHUNK = 25;
+
+/** D1's limit on bound parameters per statement; the permanent-deletion batch asserts it stays below. */
+export const D1_MAX_BOUND_PARAMETERS = 100;
+
+/**
  * The bp0003 trigger that clears a message's pending \Deleted marks whenever its folder
  * membership changes. \Deleted and EXPUNGE are only offered while it exists.
  */
 export const DELETED_INVARIANT_TRIGGER = "bp_imap_membership_clears_deleted";
 
 /**
- * Folders whose EXPUNGE is recoverable: \Deleted messages move to Trash. Expunging Trash or
- * Drafts would delete permanently, which this server does not do yet, so \Deleted cannot
- * be set there.
+ * The bp0004 triggers that release a draft's Drafts UID whenever what its fingerprint covers
+ * changes (its content columns, or an attachment added or removed), with the table each is
+ * on. \Deleted and permanent EXPUNGE in Drafts are only offered while all of them exist. The
+ * content trigger's columns are exactly those draftFingerprint digests
+ * (tests/downstream-migrations.test.mjs keeps them in step).
  */
-export function isRecoverablyExpungeable(key: ImapFolderKey): boolean {
-	return key !== "trash" && key !== "drafts";
+export const DRAFT_INVARIANT_TRIGGERS: ReadonlyArray<{ name: string; table: string }> = [
+	{ name: "bp_imap_draft_content_releases_uid", table: "messages" },
+	{ name: "bp_imap_draft_attachment_added_releases_uid", table: "message_attachments" },
+	{ name: "bp_imap_draft_attachment_removed_releases_uid", table: "message_attachments" },
+];
+
+/**
+ * Folders whose EXPUNGE deletes permanently (A5.2c): Trash, and Drafts for their author. Every
+ * other folder's EXPUNGE is recoverable (A5.2a): \Deleted messages move to Trash.
+ */
+export function isPermanentlyExpungeable(key: ImapFolderKey): key is "trash" | "drafts" {
+	return key === "trash" || key === "drafts";
 }
 
 /**
@@ -140,4 +163,30 @@ export function chunk<T>(items: T[], size: number): T[][] {
 	const chunks: T[][] = [];
 	for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
 	return chunks;
+}
+
+/**
+ * Whether a stored object key may be deleted as part of permanently deleting message
+ * `messageId` (A5.2c post-commit cleanup), from the key alone. Only the namespaces a message
+ * owns qualify, and only in the shape the code that writes them produces:
+ *
+ * - raw: `inbound/<name>.eml` (received mail, src/lib/email/inbound.ts and intake.ts),
+ *   `imports/<messageId>.eml` (src/lib/import/service.ts), `drafts/<messageId>.eml` (JMAP
+ *   Email/import) and `canonical/<messageId>/<name>.eml` (A1's canonical layer);
+ * - attachment: `attachments/<messageId>/<attachmentId>/<filename>`.
+ *
+ * Anything else (`backups/`, `jmap-uploads/`, avatars, another message's key, a path with an
+ * empty, `.` or `..` segment) is never deletable: a corrupted reference must leak, not reach
+ * unrelated bytes.
+ */
+export function isDeletableMessageObjectKey(kind: "raw" | "attachment", key: unknown, messageId: string): boolean {
+	if (typeof key !== "string" || !key || key.includes("\0") || key.includes("\\")) return false;
+	const segments = key.split("/");
+	if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) return false;
+	if (kind === "attachment") return segments.length === 4 && segments[0] === "attachments" && segments[1] === messageId;
+	const [namespace] = segments;
+	if (namespace === "inbound") return segments.length === 2 && segments[1].endsWith(".eml") && segments[1].length > 4;
+	if (namespace === "imports" || namespace === "drafts") return segments.length === 2 && segments[1] === `${messageId}.eml`;
+	if (namespace === "canonical") return segments.length === 3 && segments[1] === messageId && segments[2].endsWith(".eml") && segments[2].length > 4;
+	return false;
 }

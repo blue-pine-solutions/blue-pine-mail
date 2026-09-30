@@ -48,8 +48,8 @@ export type ImapMailbox = {
 	selectable: true;
 	/**
 	 * Flags a client with this access may change on messages here: \Seen and \Flagged for
-	 * anyone who can read, plus \Deleted with management access in folders whose expunge is
-	 * recoverable (not Trash or Drafts) while the bp0003 invariant is installed.
+	 * anyone who can read, plus \Deleted with management access while the bp0003 invariant is
+	 * installed (in Drafts also bp0004, and only on the principal's own drafts).
 	 */
 	permanentFlags: ImapFlagName[];
 	/** Write operations (expunge, move; later append, copy) need management access, as in the web app. */

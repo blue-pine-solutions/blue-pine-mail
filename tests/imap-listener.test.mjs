@@ -409,7 +409,7 @@ print(json.dumps(out))
 });
 
 test("gate7: curl IMAPS interoperates", { skip: !tryCommand("curl") && "curl is not installed" }, async (t) => {
-	const { listener, good, bytes } = await populated(t);
+	const { listener, good, bytes, env, row } = await populated(t);
 	const url = `imaps://127.0.0.1:${listener.port}`;
 	const curl = (path, extra = []) => run("curl", ["-sS", "--insecure", "--user", `a@example.test:${good}`, ...extra, `${url}${path}`]);
 	const listing = await curl("/");
@@ -431,8 +431,17 @@ test("gate7: curl IMAPS interoperates", { skip: !tryCommand("curl") && "curl is 
 	assert.equal(expunged.status, 0, expunged.stderr);
 	assert.match(expunged.stdout, /^\* 1 EXPUNGE\r?$/m);
 	assert.match((await curl("/Trash", ["--request", "SEARCH ALL"])).stdout, /^\* SEARCH 1\r?$/m, "the expunged message is in Trash, not deleted");
-	const refused = await curl("/Trash", ["--request", "STORE 1 +FLAGS (\\Deleted)"]);
-	assert.notEqual(refused.status, 0, "curl reports the refused \\Deleted in Trash");
+	// A5.2c: in Trash, \Deleted is allowed and EXPUNGE deletes permanently, row first, bytes after.
+	const trashMarked = await curl("/Trash", ["--request", "STORE 1 +FLAGS (\\Deleted)"]);
+	assert.equal(trashMarked.status, 0, trashMarked.stderr);
+	assert.match(trashMarked.stdout, /^\* 1 FETCH \(FLAGS \(\\Seen \\Flagged \\Deleted\)\)/m);
+	const purged = await curl("/Trash", ["--verbose", "--request", "EXPUNGE"]);
+	assert.equal(purged.status, 0, purged.stderr);
+	assert.match(purged.stderr, /^< \* 1 EXPUNGE\r?$/m);
+	assert.match(purged.stderr, /^< \S+ OK EXPUNGE completed\r?$/m);
+	assert.match((await curl("/Trash", ["--request", "SEARCH ALL"])).stdout, /^\* SEARCH\r?$/m, "Trash is empty");
+	assert.equal(row("m-1"), undefined, "the message row is gone");
+	assert.equal(await env.BUCKET.get("inbound/m-1.eml"), null, "its stored bytes are gone after the commit");
 });
 
 test("a5.2b: Python imaplib MOVE and UID MOVE over TLS", { skip: !tryCommand("python3") && "python3 is not installed" }, async (t) => {
@@ -504,6 +513,91 @@ test("a5.2b: curl IMAPS MOVE and UID MOVE through custom requests", { skip: !try
 	assert.notEqual(missing.status, 0, "curl reports a MOVE to a mailbox that does not exist");
 	assert.equal(row("m-1").status, "archived");
 	assert.deepEqual([row("m-2").status, row("m-2").folder_id], ["received", "fld-work"]);
+});
+
+test("a5.2c: Python imaplib permanent EXPUNGE and CLOSE in Trash and Drafts over TLS; EXAMINE and UNSELECT never delete", { skip: !tryCommand("python3") && "python3 is not installed" }, async (t) => {
+	const context = await populated(t);
+	const { listener, good, env, row, database } = context;
+	for (const id of ["t-1", "t-2", "t-3", "t-4"]) await context.deliver(id, `Subject: ${id}\r\n\r\ntrash ${id}\r\n`, { status: "trash" });
+	await env.BUCKET.put("attachments/t-1/att-1/a.txt", "attached");
+	database.db.prepare("INSERT INTO message_attachments (id, message_id, filename, content_type, size, disposition, r2_key, created_at) VALUES ('att-1', 't-1', 'a.txt', 'text/plain', 8, 'attachment', 'attachments/t-1/att-1/a.txt', 1)").run();
+	for (const [id, userId] of [["d-1", "user-a"], ["d-2", "user-b"]]) database.db.prepare("INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, subject, text_body, status, created_at) VALUES (?, ?, 'mbx-a', 'outbound', 'a@example.test', 'b@x', ?, 'draft body', 'draft', ?)").run(id, userId, id, id === "d-1" ? 1790000100 : 1790000101);
+	const script = `
+import imaplib, ssl, sys, json
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+m = imaplib.IMAP4_SSL("127.0.0.1", int(sys.argv[1]), ssl_context=ctx)
+m.login("a@example.test", sys.argv[2])
+out = {}
+m.select("Trash")
+out["mark"] = [m.store("1", "+FLAGS", "(\\\\Deleted)")[0], m.store("3", "+FLAGS", "(\\\\Deleted)")[0]]
+typ, data = m.expunge()
+out["expunge"] = [typ, [x.decode() for x in data if x]]
+out["after"] = m.select("Trash")[1][0].decode()
+m.store("1", "+FLAGS", "(\\\\Deleted)")
+out["unselect"] = m.unselect()[0]
+out["examine"] = m.select("Trash", readonly=True)[1][0].decode()
+out["examine_store"] = m.store("1", "-FLAGS", "(\\\\Deleted)")[0]
+out["examine_close"] = m.close()[0]
+out["kept"] = m.select("Trash")[1][0].decode()
+m.response("EXPUNGE")
+out["close"] = m.close()[0]
+out["close_untagged"] = [x.decode() for x in m.response("EXPUNGE")[1] if x]
+out["closed"] = m.select("Trash")[1][0].decode()
+m.select("Drafts")
+typ, data = m.store("2", "+FLAGS", "(\\\\Deleted)")
+out["foreign"] = [typ, data[0].decode()]
+out["noop"] = m.noop()[0]
+out["own"] = m.store("1", "+FLAGS", "(\\\\Deleted)")[1][0].decode()
+typ, data = m.expunge()
+out["drafts_expunge"] = [typ, [x.decode() for x in data if x]]
+out["drafts_left"] = m.select("Drafts")[1][0].decode()
+out["logout"] = m.logout()[0]
+print(json.dumps(out))
+`;
+	const result = await new Promise((resolve, reject) => {
+		const child = spawn("python3", ["-c", script, String(listener.port), good]);
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (chunk) => (stdout += chunk));
+		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.on("close", (code) => (code === 0 ? resolve(JSON.parse(stdout)) : reject(new Error(stderr))));
+	});
+	assert.deepEqual(result.mark, ["OK", "OK"]);
+	assert.deepEqual(result.expunge, ["OK", ["3", "1"]], "EXPUNGE responses highest sequence number first");
+	assert.equal(result.after, "2");
+	assert.equal(result.unselect, "OK");
+	assert.equal(result.examine, "2");
+	assert.equal(result.examine_store, "NO", "EXAMINE cannot change \\Deleted");
+	assert.equal(result.examine_close, "OK");
+	assert.equal(result.kept, "2", "neither UNSELECT nor CLOSE under EXAMINE deleted anything");
+	assert.equal(result.close, "OK");
+	assert.deepEqual(result.close_untagged, [], "CLOSE sends no EXPUNGE");
+	assert.equal(result.closed, "1");
+	assert.deepEqual(result.foreign, ["NO", "[NOPERM] Only the author of a draft may mark it deleted"], "another user's draft cannot be marked \\Deleted");
+	assert.equal(result.noop, "OK", "the session goes on after the refusal");
+	assert.match(result.own, /\\Deleted/);
+	assert.deepEqual(result.drafts_expunge, ["OK", ["1"]]);
+	assert.equal(result.drafts_left, "1");
+	assert.equal(result.logout, "BYE");
+	assert.deepEqual(["t-1", "t-2", "t-3", "t-4", "d-1", "d-2"].map((id) => !!row(id)), [false, false, false, true, false, true]);
+	assert.equal(await env.BUCKET.get("inbound/t-1.eml"), null);
+	assert.equal(await env.BUCKET.get("attachments/t-1/att-1/a.txt"), null, "the attachment object is removed after the commit");
+	assert.ok(await env.BUCKET.get("inbound/t-4.eml"), "an unmarked message keeps its bytes");
+});
+
+test("a5.2c: a revoked app password ends the session with BYE before a permanent EXPUNGE deletes anything", async (t) => {
+	const context = await populated(t);
+	const { listener, database, row } = context;
+	await context.deliver("t-1", "Subject: t\r\n\r\nx\r\n", { status: "trash" });
+	const { credential, id } = await context.credential("user-a", "mbx-a");
+	const { client } = await connected(listener.port);
+	assertTagged(await client.login("a@example.test", credential), "OK");
+	assertTagged(await client.command("SELECT Trash"), "OK");
+	assertTagged(await client.command("STORE 1 +FLAGS (\\Deleted)"), "OK");
+	database.db.prepare("DELETE FROM mail_app_passwords WHERE id = ?").run(id);
+	const answer = await client.command("EXPUNGE");
+	assert.ok(answer.untagged.some((unit) => unit.text.startsWith("* BYE")), JSON.stringify(answer));
+	assert.ok(row("t-1"), "nothing was deleted");
 });
 
 test("gate7: openssl s_client sees implicit TLS and the greeting", { skip: !tryCommand("openssl") && "openssl is not installed" }, async (t) => {

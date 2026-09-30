@@ -5,8 +5,24 @@ import { folders, messages } from "@/db/schema";
 import { imapMessageUids } from "@/db/schema/bluepine";
 import { resolveCanonicalMessage } from "@/lib/email/canonical-message";
 import { fingerprintFromKey, isCanonicalKey } from "@/lib/email/canonical-message-utils";
+import { isMailboxSharingEnabled } from "@/lib/mailboxes/access-utils";
 import { authorizeImapAccess } from "./access";
-import { currentDraftFingerprints, deletedInvariantInstalled, ensureFolderRow, findFolderRow, hasDeletedInvariant, membershipCondition, relocateImapMessages, releaseUid, syncFolder } from "./state";
+import { cleanupDeletedMessageObjects } from "./cleanup";
+import {
+	currentDraftFingerprints,
+	deleteImapMessagesPermanently,
+	deletedInvariantInstalled,
+	draftInvariantInstalled,
+	ensureFolderRow,
+	findFolderRow,
+	hasDeletedInvariant,
+	hasDraftInvariant,
+	membershipCondition,
+	relocateImapMessages,
+	releaseStaleDraftUids,
+	releaseUid,
+	syncFolder,
+} from "./state";
 import type { ImapFolderRow } from "./state";
 import type {
 	ImapAccess,
@@ -25,7 +41,21 @@ import type {
 	ImapPrincipal,
 } from "./types";
 import { recordSpamTraining } from "@/lib/spam/feedback";
-import { chunk, customFolderKey, customFolderNames, FLAG_STORE_CHUNK, flagsFor, ImapStateError, imapMoveTarget, isRecoverablyExpungeable, parseFolderKey, RELOCATION_CHUNK, STORABLE_FLAGS, SYSTEM_FOLDERS } from "./utils";
+import {
+	chunk,
+	customFolderKey,
+	customFolderNames,
+	FLAG_STORE_CHUNK,
+	flagsFor,
+	ImapStateError,
+	imapMoveTarget,
+	isPermanentlyExpungeable,
+	parseFolderKey,
+	PERMANENT_DELETE_CHUNK,
+	RELOCATION_CHUNK,
+	STORABLE_FLAGS,
+	SYSTEM_FOLDERS,
+} from "./utils";
 
 /**
  * Protocol-neutral IMAP mailbox state for one authenticated principal (a verified mail
@@ -39,48 +69,62 @@ import { chunk, customFolderKey, customFolderNames, FLAG_STORE_CHUNK, flagsFor, 
  * - Content for a UID is the A1 canonical representation, byte for byte, and never changes
  *   while the UID exists.
  * - \Deleted is IMAP's own mark on a UID. Only principals with management access may set
- *   it, only in folders whose expunge is recoverable (not Trash or Drafts), and only while
- *   the bp0003 invariant is installed. Expunging moves \Deleted messages to Trash; nothing
- *   here deletes a message or a stored object.
+ *   it, and only while the bp0003 invariant is installed; in Drafts only on the principal's
+ *   own drafts and only while the bp0004 invariant is installed too. Expunging moves \Deleted
+ *   messages to Trash, except in Trash and Drafts, where it deletes them permanently (A5.2c):
+ *   the database rows first, in one guarded batch, and their stored objects only after that
+ *   has committed, best effort.
  * - MOVE (moveImapMessages) is the same relocation for any UIDs, under the special-folder
- *   policy of imapMoveTarget; it too deletes nothing.
+ *   policy of imapMoveTarget; it deletes nothing.
  *
  * Authorization is re-evaluated on every call, and folder keys are resolved within the
  * principal's own mailbox only.
  */
 
-type Opened = { db: AppDatabase; access: ImapAccess; mailbox: ImapMailbox; deletable: boolean };
+/**
+ * `deletable`: management access and the bp0003 invariant, what \Deleted, EXPUNGE and MOVE
+ * need anywhere. `draftDeletable`: that, and the bp0004 invariant, what they need in Drafts.
+ */
+type Deletability = { deletable: boolean; draftDeletable: boolean };
+type Opened = { db: AppDatabase; access: ImapAccess; mailbox: ImapMailbox } & Deletability;
+
+async function deletability(db: AppDatabase, access: ImapAccess): Promise<Deletability> {
+	const deletable = access.canManage && (await hasDeletedInvariant(db));
+	return { deletable, draftDeletable: deletable && (await hasDraftInvariant(db)) };
+}
 
 async function open(env: CloudflareEnv, principal: ImapPrincipal, key: string): Promise<Opened> {
 	const db = getDb(env);
 	const access = await authorizeImapAccess(db, principal);
 	if (!access) throw new ImapStateError("forbidden", "Mailbox access denied");
-	const deletable = access.canManage && (await hasDeletedInvariant(db));
-	const mailbox = await resolveMailbox(db, access, key, deletable);
+	const allowed = await deletability(db, access);
+	const mailbox = await resolveMailbox(db, access, key, allowed);
 	if (!mailbox) throw new ImapStateError("nonexistent", "No such folder");
-	return { db, access, mailbox, deletable };
+	return { db, access, mailbox, ...allowed };
 }
 
 /**
  * The flags a principal may change on messages in a folder. Read and starred state can be
  * changed by anyone who can read the mailbox, as in the web app. \Deleted needs management
- * access (its purpose is a later expunge), a folder whose expunge is recoverable, and the
- * bp0003 invariant (`deletable`).
+ * access (its purpose is a later expunge) and the bp0003 invariant (`deletable`), in Drafts
+ * also the bp0004 invariant (`draftDeletable`); in Drafts it further applies only to the
+ * principal's own drafts, which storeImapFlags enforces per message.
  */
-function permanentFlags(key: ImapFolderKey, deletable: boolean): ImapFlagName[] {
-	return deletable && isRecoverablyExpungeable(key) ? ["seen", "flagged", "deleted"] : ["seen", "flagged"];
+function permanentFlags(key: ImapFolderKey, allowed: Deletability): ImapFlagName[] {
+	const deletable = key === "drafts" ? allowed.draftDeletable : allowed.deletable;
+	return deletable ? ["seen", "flagged", "deleted"] : ["seen", "flagged"];
 }
 
-async function resolveMailbox(db: AppDatabase, access: ImapAccess, key: string, deletable: boolean): Promise<ImapMailbox | null> {
+async function resolveMailbox(db: AppDatabase, access: ImapAccess, key: string, allowed: Deletability): Promise<ImapMailbox | null> {
 	const parsed = parseFolderKey(key);
 	if (!parsed) return null;
-	if (parsed.kind === "role") return (await listMailboxes(db, access, deletable)).find((mailbox) => mailbox.key === key) ?? null;
+	if (parsed.kind === "role") return (await listMailboxes(db, access, allowed)).find((mailbox) => mailbox.key === key) ?? null;
 	const [folder] = await db.select({ id: folders.id }).from(folders).where(and(eq(folders.id, parsed.folderId), eq(folders.mailboxId, access.mailboxId))).limit(1);
 	if (!folder) return null;
-	return (await listMailboxes(db, access, deletable)).find((mailbox) => mailbox.key === key) ?? null;
+	return (await listMailboxes(db, access, allowed)).find((mailbox) => mailbox.key === key) ?? null;
 }
 
-async function listMailboxes(db: AppDatabase, access: ImapAccess, deletable: boolean): Promise<ImapMailbox[]> {
+async function listMailboxes(db: AppDatabase, access: ImapAccess, allowed: Deletability): Promise<ImapMailbox[]> {
 	const custom = await db
 		.select({ id: folders.id, name: folders.name })
 		.from(folders)
@@ -95,7 +139,7 @@ async function listMailboxes(db: AppDatabase, access: ImapAccess, deletable: boo
 			specialUse: folder.specialUse,
 			folderId: null,
 			selectable: true,
-			permanentFlags: permanentFlags(folder.role, deletable),
+			permanentFlags: permanentFlags(folder.role, allowed),
 			mayWrite: access.canManage,
 			mayRename: false,
 			mayDelete: false,
@@ -107,7 +151,7 @@ async function listMailboxes(db: AppDatabase, access: ImapAccess, deletable: boo
 			specialUse: null,
 			folderId: folder.id,
 			selectable: true,
-			permanentFlags: permanentFlags(customFolderKey(folder.id), deletable),
+			permanentFlags: permanentFlags(customFolderKey(folder.id), allowed),
 			mayWrite: access.canManage,
 			mayRename: access.canManage,
 			mayDelete: access.canManage,
@@ -129,7 +173,7 @@ export async function listImapMailboxes(env: CloudflareEnv, principal: ImapPrinc
 				AND substr(folder_key, 3) NOT IN (SELECT id FROM folders WHERE mailbox_id = ${access.mailboxId})
 		)
 	`);
-	return listMailboxes(db, access, access.canManage && (await hasDeletedInvariant(db)));
+	return listMailboxes(db, access, await deletability(db, access));
 }
 
 async function synced(opened: Opened): Promise<ImapFolderRow> {
@@ -310,8 +354,34 @@ export async function getImapMessageSize(env: CloudflareEnv, principal: ImapPrin
 function deletedRefusal(opened: Opened): ImapStateError | null {
 	if (!opened.access.canManage) return new ImapStateError("denied", "This access does not allow marking messages deleted");
 	if (!opened.deletable) return new ImapStateError("unsupported", "\\Deleted is unavailable on this server right now");
-	if (!isRecoverablyExpungeable(opened.mailbox.key)) return new ImapStateError("unsupported", "Messages in Trash and Drafts cannot be marked deleted on this server yet");
+	if (opened.mailbox.key === "drafts" && !opened.draftDeletable) return new ImapStateError("unsupported", "\\Deleted is unavailable in Drafts on this server right now");
 	return null;
+}
+
+/**
+ * In Drafts, \Deleted belongs to a draft's author: refuse (`denied`) when any of `uids` names
+ * another user's draft, read from current state. Stale Drafts UIDs (content changed before
+ * bp0004 was installed) are released first, so the check and the write only ever see UIDs
+ * that name their draft's current content.
+ */
+async function assertOwnDrafts(opened: Opened, folder: ImapFolderRow, uids: number[]): Promise<void> {
+	await releaseStaleDraftUids(opened.db, folder, opened.access.mailboxId);
+	const authors = await opened.db
+		.select({ userId: messages.userId })
+		.from(imapMessageUids)
+		.innerJoin(messages, eq(messages.id, imapMessageUids.messageId))
+		.where(and(eq(imapMessageUids.imapFolderId, folder.id), inArray(imapMessageUids.uid, uids), membershipCondition(opened.access.mailboxId, "drafts")));
+	if (authors.some((row) => row.userId !== opened.access.userId)) throw new ImapStateError("denied", "Only the author of a draft may mark it deleted");
+}
+
+/** SQL guards of a \Deleted write in the opened folder: bp0003 always, and in Drafts bp0004 and the principal's authorship. */
+function deletedWriteGuards(opened: Opened) {
+	if (opened.mailbox.key !== "drafts") return [deletedInvariantInstalled];
+	return [
+		deletedInvariantInstalled,
+		draftInvariantInstalled,
+		exists(opened.db.select({ one: sql`1` }).from(messages).where(and(eq(messages.id, imapMessageUids.messageId), eq(messages.userId, opened.access.userId)))),
+	];
 }
 
 /**
@@ -329,6 +399,10 @@ export async function setImapMessageFlags(env: CloudflareEnv, principal: ImapPri
 		const refusal = deletedRefusal(opened);
 		if (refusal) throw refusal;
 	}
+	if (changes.deleted === true && opened.mailbox.key === "drafts") {
+		const folder = await findFolderRow(opened.db, opened.access.mailboxId, opened.mailbox.key);
+		if (folder) await assertOwnDrafts(opened, folder, [uid]);
+	}
 	const hit = await resolveHit(opened, uid);
 	if (!hit) return null;
 	const set: Partial<typeof messages.$inferInsert> = {};
@@ -339,7 +413,7 @@ export async function setImapMessageFlags(env: CloudflareEnv, principal: ImapPri
 		await opened.db
 			.update(imapMessageUids)
 			.set({ deleted: changes.deleted })
-			.where(and(eq(imapMessageUids.imapFolderId, hit.folder.id), eq(imapMessageUids.uid, uid), deletedInvariantInstalled));
+			.where(and(eq(imapMessageUids.imapFolderId, hit.folder.id), eq(imapMessageUids.uid, uid), ...deletedWriteGuards(opened)));
 	}
 	const entry = await resolveHit(opened, uid);
 	return entry ? flagsFor(entry.message, entry.mapping.deleted) : null;
@@ -353,8 +427,10 @@ export async function setImapMessageFlags(env: CloudflareEnv, principal: ImapPri
  *   state the web app and JMAP change, so a write here bumps the product's revision through
  *   its own triggers. Outbound mail is always \Seen, so clearing \Seen never writes it.
  * - `deleted` is `imap_message_uids.deleted`, the UID's own \Deleted mark. It needs
- *   management access (`denied` otherwise) and a folder where it is permanent: not Trash or
- *   Drafts, and only while the bp0003 invariant is installed (`unsupported` otherwise).
+ *   management access (`denied` otherwise) and the bp0003 invariant, in Drafts also the bp0004
+ *   invariant (`unsupported` otherwise). In Drafts it applies only to the principal's own
+ *   drafts: naming another user's draft is `denied`, and the write itself carries the
+ *   authorship guard, so a draft never gets a \Deleted mark from anyone but its author.
  *   Naming it where it cannot change refuses the whole request before anything is written,
  *   so `+FLAGS (\Seen \Deleted)` never sets \Seen alone. A replace (`FLAGS`) changes only
  *   the flags the principal may change here, so it never touches \Deleted for a reader.
@@ -383,6 +459,8 @@ export async function storeImapFlags(env: CloudflareEnv, principal: ImapPrincipa
 		if (!uidChunk.length) continue;
 		const folder = await findFolderRow(opened.db, opened.access.mailboxId, opened.mailbox.key);
 		if (!folder) continue;
+		// Setting \Deleted on another user's draft is refused; clearing is guarded in the write below.
+		if (opened.mailbox.key === "drafts" && changing.includes("deleted") && targetOf("deleted")) await assertOwnDrafts(opened, folder, uidChunk);
 		const member = membershipCondition(opened.access.mailboxId, opened.mailbox.key);
 		const mapped = inArray(
 			messages.id,
@@ -406,7 +484,7 @@ export async function storeImapFlags(env: CloudflareEnv, principal: ImapPrincipa
 						inArray(imapMessageUids.uid, uidChunk),
 						ne(imapMessageUids.deleted, value),
 						exists(opened.db.select({ one: sql`1` }).from(messages).where(and(eq(messages.id, imapMessageUids.messageId), member))),
-						deletedInvariantInstalled,
+						...deletedWriteGuards(opened),
 					),
 				);
 		});
@@ -423,29 +501,30 @@ export async function storeImapFlags(env: CloudflareEnv, principal: ImapPrincipa
 
 /**
  * Why EXPUNGE may not run in an opened folder, or null when it may: `denied` without
- * management access, `unsupported` in Trash and Drafts (their expunge would be a permanent
- * deletion, which this server does not do yet) or without the bp0003 invariant.
+ * management access, `unsupported` without the bp0003 invariant, and in Drafts without the
+ * bp0004 invariant.
  */
 function expungeRefusal(opened: Opened): ImapStateError | null {
 	if (!opened.access.canManage) return new ImapStateError("denied", "This access does not allow expunging messages");
-	if (!isRecoverablyExpungeable(opened.mailbox.key)) return new ImapStateError("unsupported", "Messages in Trash and Drafts cannot be expunged on this server yet");
 	if (!opened.deletable) return new ImapStateError("unsupported", "EXPUNGE is unavailable on this server right now");
+	if (opened.mailbox.key === "drafts" && !opened.draftDeletable) return new ImapStateError("unsupported", "EXPUNGE is unavailable in Drafts on this server right now");
 	return null;
 }
 
 /**
- * Recoverable EXPUNGE (A5.2a): move every message of the folder whose UID is at most
- * `maxUid` and is marked \Deleted to Trash (status `trash`, no folder), and return the UIDs
- * that left the folder, ascending. The session passes the highest UID it has announced, so a
- * message it never reported is never expunged under it.
+ * EXPUNGE: remove every message of the folder whose UID is at most `maxUid` and is marked
+ * \Deleted, and return the UIDs that left the folder, ascending. The session passes the highest
+ * UID it has announced, so a message it never reported is never expunged under it. Refusals
+ * (expungeRefusal) are raised before anything changes; each chunk is authorized afresh, and a
+ * later chunk may still be refused (or find access gone) after earlier chunks committed, which
+ * stay committed.
  *
- * Nothing is deleted: the message keeps its row, read and starred state, date, stored bytes
- * and attachments, and gets a new UID in Trash without \Deleted. Each chunk of UIDs is
- * authorized afresh and moved by one atomic relocateImapMessages batch, which re-checks
- * \Deleted, membership and the bp0003 invariant at that moment: a UID whose mark was cleared
- * or whose message moved meanwhile stays where it is. Refusals (expungeRefusal)
- * are raised before anything moves; a later chunk may still be refused (or find access
- * gone) after earlier chunks moved.
+ * - Everywhere but Trash and Drafts it is recoverable (A5.2a): the messages move to Trash
+ *   (status `trash`, no folder) by one atomic relocateImapMessages batch per chunk of 80, which
+ *   re-checks \Deleted, membership and bp0003. Nothing is deleted: row, read and starred state,
+ *   date, stored bytes and attachments stay, and the message gets a new Trash UID without
+ *   \Deleted.
+ * - In Trash and Drafts it is permanent (A5.2c, permanentlyExpunge).
  */
 export async function expungeImapFolder(env: CloudflareEnv, principal: ImapPrincipal, key: ImapFolderKey, maxUid: number): Promise<number[]> {
 	const first = await open(env, principal, key);
@@ -453,6 +532,7 @@ export async function expungeImapFolder(env: CloudflareEnv, principal: ImapPrinc
 	if (refusal) throw refusal;
 	const folder = await findFolderRow(first.db, first.access.mailboxId, first.mailbox.key);
 	if (!folder) return [];
+	if (isPermanentlyExpungeable(first.mailbox.key)) return permanentlyExpunge(env, principal, first, folder, maxUid);
 	const candidates = (
 		await first.db
 			.select({ uid: imapMessageUids.uid })
@@ -469,6 +549,56 @@ export async function expungeImapFolder(env: CloudflareEnv, principal: ImapPrinc
 		const trash = await ensureFolderRow(opened.db, opened.access.mailboxId, "trash");
 		const { released } = await relocateImapMessages(opened.db, opened.access.mailboxId, { folder, key: opened.mailbox.key }, { folder: trash, key: "trash" }, { status: "trash", folderId: null }, uidChunk, { markedDeleted: true });
 		expunged.push(...released);
+	}
+	return expunged.sort((a, b) => a - b);
+}
+
+/**
+ * Permanent EXPUNGE in Trash, and in Drafts for the principal's own drafts (A5.2c). Database
+ * truth disappears before any stored byte does:
+ *
+ * 1. In Drafts, UIDs that no longer name their draft's current content are released first
+ *    (releaseStaleDraftUids); any edit after that releases its UID itself (bp0004).
+ * 2. Candidates are the folder's \Deleted UIDs up to `maxUid` (in Drafts, the principal's
+ *    drafts only; another user's marked draft is simply left), in chunks of 25.
+ * 3. Each chunk is authorized afresh (authorizeImapAccess, expungeRefusal) and deleted by one
+ *    atomic deleteImapMessagesPermanently batch, which re-checks the \Deleted mark on the
+ *    exact UID, membership, the folder, authorship in Drafts, bp0003 (and bp0004) and the
+ *    principal's authority inside its own SQL. What it returns is exactly what it deleted.
+ * 4. Only after that batch has committed, cleanupDeletedMessageObjects removes the deleted
+ *    messages' raw bytes and attachment objects, best effort: a failure leaves an orphaned
+ *    object and a log line, never a restored row or a failed EXPUNGE.
+ */
+async function permanentlyExpunge(env: CloudflareEnv, principal: ImapPrincipal, first: Opened, folder: ImapFolderRow, maxUid: number): Promise<number[]> {
+	const key = first.mailbox.key as "trash" | "drafts";
+	if (key === "drafts") await releaseStaleDraftUids(first.db, folder, first.access.mailboxId);
+	const ownership = key === "drafts" ? eq(messages.userId, first.access.userId) : undefined;
+	const candidates = (
+		await first.db
+			.select({ uid: imapMessageUids.uid })
+			.from(imapMessageUids)
+			.innerJoin(messages, eq(messages.id, imapMessageUids.messageId))
+			.where(and(eq(imapMessageUids.imapFolderId, folder.id), eq(imapMessageUids.deleted, true), lte(imapMessageUids.uid, maxUid), membershipCondition(first.access.mailboxId, key), ownership))
+			.orderBy(asc(imapMessageUids.uid))
+	).map((row) => row.uid);
+	const expunged: number[] = [];
+	for (const [index, uidChunk] of chunk(candidates, PERMANENT_DELETE_CHUNK).entries()) {
+		const opened = index === 0 ? first : await open(env, principal, key);
+		const again = expungeRefusal(opened);
+		if (again) throw again;
+		const { released, deleted } = await deleteImapMessagesPermanently(opened.db, { folder, key }, uidChunk, maxUid, {
+			userId: opened.access.userId,
+			mailboxId: opened.access.mailboxId,
+			appPasswordId: principal.appPasswordId,
+			sharedAccess: isMailboxSharingEnabled(),
+		});
+		expunged.push(...released);
+		try {
+			await cleanupDeletedMessageObjects(env, opened.db, deleted);
+		} catch (error) {
+			// The deletion has committed; cleanup is best effort and logs its own failures.
+			console.error(JSON.stringify({ event: "expunge.cleanup-failed", messageIds: deleted.map((message) => message.messageId), stage: "cleanup", error: error instanceof Error ? error.message : String(error) }));
+		}
 	}
 	return expunged.sort((a, b) => a - b);
 }
@@ -492,7 +622,7 @@ async function openMove(env: CloudflareEnv, principal: ImapPrincipal, key: ImapF
 	const opened = await open(env, principal, key);
 	const refusal = moveRefusal(opened);
 	if (refusal) throw refusal;
-	const destination = await resolveMailbox(opened.db, opened.access, destinationKey, opened.deletable);
+	const destination = await resolveMailbox(opened.db, opened.access, destinationKey, opened);
 	if (!destination) throw new ImapStateError("nonexistent-destination", "No such destination mailbox");
 	const rule = imapMoveTarget(opened.mailbox.key, destination.key);
 	if ("refusal" in rule) throw new ImapStateError("unsupported", rule.refusal);

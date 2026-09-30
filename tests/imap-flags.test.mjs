@@ -211,13 +211,14 @@ test("a5.1: \\Answered, \\Draft and keywords are accepted and not stored; \\Rece
 	assert.equal(context.row("d-1").status, "draft");
 });
 
-test("a5.1/a5.2a: \\Deleted where it cannot change: NO [CANNOT] in Trash for the owner, NO [NOPERM] without management access, and the session goes on", async (t) => {
+test("a5.1/a5.2a/a5.2c: \\Deleted where it cannot change: NO [CANNOT] in Drafts without bp0004 for the owner, NO [NOPERM] without management access, and the session goes on", async (t) => {
 	const owner = await setup(t);
-	await deliverMany(owner, ["m-1"], { status: "trash" });
-	await owner.client.command("SELECT Trash");
+	await deliverMany(owner, ["m-1"], { status: "draft", direction: "outbound", from_addr: "a@example.test", raw_r2_key: null });
+	owner.database.db.exec("DROP TRIGGER bp_imap_draft_attachment_removed_releases_uid");
+	await owner.client.command("SELECT Drafts");
 	const before = productState(owner);
 	for (const command of ["STORE 1 +FLAGS (\\Deleted)", "STORE 1 FLAGS (\\Seen \\Deleted)", "UID STORE 1 -FLAGS.SILENT (\\Deleted)", "STORE 1 +FLAGS (\\Seen \\Deleted)"]) {
-		assertTagged(await owner.client.command(command), "NO", /\[CANNOT\] Messages in Trash and Drafts cannot be marked deleted on this server yet/, command);
+		assertTagged(await owner.client.command(command), "NO", /\[CANNOT\] \\Deleted is unavailable in Drafts on this server right now/, command);
 	}
 	assert.equal(productState(owner), before, "a refused STORE writes nothing, not even the \\Seen it also named");
 	assertTagged(await owner.client.command("NOOP"), "OK");

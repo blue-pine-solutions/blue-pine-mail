@@ -34,7 +34,7 @@ Cloudflare charges depend on your plan and usage; check Cloudflare's current pri
 
 ## Current limitations
 
-- Desktop and phone mail clients can connect over IMAP only to the Node/Docker build. Over IMAP they can read mail, mark it read, unread or flagged, move it between folders and delete it to Trash, but not copy or upload it, create folders, or delete it permanently (see [self-hosting](docs/self-hosting.md#mail-clients-over-imap)). There is no SMTP submission service, and the Cloudflare Workers deployment has no IMAP. Use the web app, JMAP clients or the API to send and to organize mail.
+- Desktop and phone mail clients can connect over IMAP only to the Node/Docker build. Over IMAP they can read mail, mark it read, unread or flagged, move it between folders, delete it to Trash, and delete it permanently from Trash (and from Drafts, their own drafts only), but not copy or upload it or create folders (see [self-hosting](docs/self-hosting.md#mail-clients-over-imap)). There is no SMTP submission service, and the Cloudflare Workers deployment has no IMAP. Use the web app, JMAP clients or the API to send and to organize mail.
 - The Docker build keeps its database and files on one local volume. The built-in backups are record exports stored on that same volume, so they are not an off-host disaster-recovery copy.
 - One host can bind public port 25 only once. Running several Docker installations on one server needs an inbound mail front end (or the Cloudflare relay Worker) to route mail to each.
 

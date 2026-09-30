@@ -3,8 +3,9 @@
  * src/lib/imap/ into a Worker, runs it in workerd (Miniflare) with real D1 and R2
  * bindings, and exercises migrations, concurrent first access and delivery, deletion,
  * canonical bytes, batched flag writes (A5.1), bp0003's \Deleted invariant, \Deleted and
- * recoverable EXPUNGE (A5.2a), MOVE and its spam training (A5.2b), the database guards,
- * backup/restore and a restart.
+ * recoverable EXPUNGE (A5.2a), MOVE and its spam training (A5.2b), bp0004 and permanent
+ * EXPUNGE in Trash and Drafts over D1 and R2 (A5.2c), the database guards, backup/restore and
+ * a restart.
  *
  *   node scripts/imap-state-d1-check.mjs
  *
@@ -28,6 +29,7 @@ const worker = `
 import * as imap from "./src/lib/imap/service.ts";
 import * as state from "./src/lib/imap/state.ts";
 import * as spam from "./src/lib/spam/feedback.ts";
+import { cleanupDeletedMessageObjects } from "./src/lib/imap/cleanup.ts";
 import { getDb } from "./src/db/index.ts";
 import { applyPendingMigrations } from "./src/lib/migrations/service.ts";
 import { exportDatabaseRecords, restoreDatabaseRecords } from "./src/lib/backups/export.ts";
@@ -66,6 +68,30 @@ export default {
 				const destination = await state.ensureFolderRow(db, mailboxId, destinationKey);
 				return Response.json(await state.relocateImapMessages(db, mailboxId, { folder: source, key: sourceKey }, { folder: destination, key: destinationKey }, target, uids, guards));
 			}
+			if (op === "permanent") {
+				const [mailboxId, key, uids, maxUid, authority] = args;
+				const db = getDb(env);
+				const folder = await state.findFolderRow(db, mailboxId, key);
+				// Every bound parameter count D1 sees, to certify they stay under its limit of 100.
+				const counts = [];
+				const client = db.$client;
+				const prepare = client.prepare;
+				client.prepare = function (query) {
+					const statement = prepare.call(client, query);
+					const bind = statement.bind;
+					statement.bind = function (...values) {
+						counts.push(values.length);
+						return bind.apply(statement, values);
+					};
+					return statement;
+				};
+				try {
+					return Response.json({ ...(await state.deleteImapMessagesPermanently(db, { folder, key }, uids, maxUid, authority)), counts });
+				} finally {
+					client.prepare = prepare;
+				}
+			}
+			if (op === "cleanup") return Response.json(await cleanupDeletedMessageObjects(env, getDb(env), args[0]));
 			if (op === "applySpamFeedback") return Response.json(await spam.applySpamFeedback(env, ...args));
 			if (op === "recordSpamTraining") return Response.json(await spam.recordSpamTraining(env, ...args));
 			if (op === "roundTrip") {
@@ -133,10 +159,12 @@ try {
 	console.log("Migrations (Workers runner on D1)");
 	const migrated = await op("migrate");
 	const migrationFiles = readdirSync(join(root, "drizzle", "migrations")).filter((name) => name.endsWith(".sql"));
-	check("every migration applies, bp0003 last", migrated.ready && migrated.applied.length === migrationFiles.length && migrated.applied.at(-1) === "bp0003_clear_imap_deleted_on_membership_change.sql", migrated);
-	check(`${migrationFiles.length} migrations: ${migrationFiles.filter((name) => /^\d/.test(name)).length} upstream + ${migrationFiles.filter((name) => name.startsWith("bp")).length} Blue Pine`, migrationFiles.length === 51 && migrationFiles.filter((name) => name.startsWith("bp")).length === 3);
-	const onMessages = (await sql(["SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'messages' AND name LIKE 'bp%'"]))[0];
-	check("bp0003's trigger is the only Blue Pine trigger on messages", onMessages.length === 1 && onMessages[0].name === "bp_imap_membership_clears_deleted" && /AFTER UPDATE OF `mailbox_id`, `status`, `folder_id` ON `messages`/.test(onMessages[0].sql), onMessages);
+	check("every migration applies, bp0004 last", migrated.ready && migrated.applied.length === migrationFiles.length && migrated.applied.at(-1) === "bp0004_release_imap_draft_uid_on_content_change.sql", migrated);
+	check(`${migrationFiles.length} migrations: ${migrationFiles.filter((name) => /^\d/.test(name)).length} upstream + ${migrationFiles.filter((name) => name.startsWith("bp")).length} Blue Pine`, migrationFiles.length === 52 && migrationFiles.filter((name) => name.startsWith("bp")).length === 4);
+	const onMessages = (await sql(["SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'messages' AND name LIKE 'bp%' ORDER BY name"]))[0];
+	check("bp0003's and bp0004's triggers are the only Blue Pine triggers on messages", onMessages.length === 2 && onMessages[0].name === "bp_imap_draft_content_releases_uid" && onMessages[1].name === "bp_imap_membership_clears_deleted" && /AFTER UPDATE OF `mailbox_id`, `status`, `folder_id` ON `messages`/.test(onMessages[1].sql) && /`in_reply_to`, `references_header` ON `messages`/.test(onMessages[0].sql), onMessages);
+	const onAttachments = (await sql(["SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'message_attachments' AND name LIKE 'bp%' ORDER BY name"]))[0].map((row) => row.name);
+	check("bp0004's attachment triggers are installed on message_attachments", same(onAttachments, ["bp_imap_draft_attachment_added_releases_uid", "bp_imap_draft_attachment_removed_releases_uid"]), onAttachments);
 	check("a second run applies nothing", (await op("migrate")).applied.length === 0);
 
 	await sql(
@@ -265,10 +293,8 @@ try {
 	check("a mailbox change clears \\Deleted", (await tDeleted()) === 0);
 
 	console.log("\\Deleted and recoverable EXPUNGE (A5.2a, D1)");
-	check("owner may set \\Deleted in INBOX, not in Trash or Drafts", (await op("listImapMailboxes", owner)).every((mailbox) => mailbox.permanentFlags.includes("deleted") === !["trash", "drafts"].includes(mailbox.key)));
+	check("owner may set \\Deleted in every folder, Trash and Drafts included (A5.2c)", (await op("listImapMailboxes", owner)).every((mailbox) => mailbox.permanentFlags.includes("deleted")));
 	await op("openImapFolder", owner, "trash");
-	check("\\Deleted in Trash is unsupported", (await op("store", owner, "trash", [1], { mode: "add", flags: ["deleted"] })).code === "unsupported");
-	check("EXPUNGE in Trash is unsupported", (await op("expungeImapFolder", owner, "trash", 1000)).code === "unsupported");
 	check("EXPUNGE for a read-only delegate is denied", (await op("expungeImapFolder", { userId: "user-b", mailboxId: "mbx-s" }, "inbox", 1000)).code === "denied");
 	await sql(["UPDATE messages SET read = 1, starred = 1 WHERE id = 'raw-1'"]);
 	await op("store", owner, "inbox", [rawUid], { mode: "add", flags: ["deleted"] });
@@ -410,8 +436,152 @@ try {
 	check("the web app's report-spam still moves and trains on D1", (await op("applySpamFeedback", { id: "user-a", role: "admin" }, "sp-1", "spam")) === true && (await sql(["SELECT status FROM messages WHERE id = 'sp-1'"]))[0][0].status === "spam" && (await spTotals("mbx-a")).spam === trained.spam);
 	check("the web app's not-spam still moves and trains ham on D1", (await op("applySpamFeedback", { id: "user-a", role: "admin" }, "sp-1", "ham")) === true && (await sql(["SELECT status FROM messages WHERE id = 'sp-1'"]))[0][0].status === "received" && same(await spTotals("mbx-a"), { spam: 0, ham: trained.spam }));
 
+	console.log("bp0004 and permanent EXPUNGE in Trash and Drafts (A5.2c, D1 + R2)");
+	// A fresh mailbox: mbx-a's Trash UIDNEXT was exhausted by the rollback checks above.
+	await sql(
+		["INSERT INTO mailboxes (id, user_id, domain_id, local_part, type, created_at) VALUES ('mbx-p', 'user-a', 'domain-1', 'purge', 'personal', 1)"],
+		["INSERT INTO mail_app_passwords (id, user_id, mailbox_id, label, public_id, secret_hash, scopes, created_at) VALUES ('map-p', 'user-a', 'mbx-p', 'd1', 'pub-p', 'h', '[\"imap\"]', 1)"],
+	);
+	const purger = { userId: "user-a", mailboxId: "mbx-p", appPasswordId: "map-p" };
+	const authority = { userId: "user-a", mailboxId: "mbx-p", appPasswordId: "map-p", sharedAccess: true };
+	let pCounter = 0;
+	const putMessage = async (id, status, values = {}) => {
+		await bucket.put(`inbound/${id}.eml`, `Subject: ${id}\r\n\r\npurgeable body ${id}\r\n`);
+		await sql([`INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, subject, text_body, status, raw_r2_key, created_at) VALUES (?, ?, 'mbx-p', ?, 'a@example.test', 'b@x', ?, ?, ?, ?, ?)`, id, values.userId ?? "user-a", status === "draft" ? "outbound" : "inbound", `subject ${id}`, `purgeable body ${id}`, status, status === "draft" ? null : `inbound/${id}.eml`, 20000 + ++pCounter]);
+	};
+	const putAttachment = async (messageId, attachmentId) => {
+		const key = `attachments/${messageId}/${attachmentId}/f.txt`;
+		await bucket.put(key, "attached");
+		await sql(["INSERT INTO message_attachments (id, message_id, filename, content_type, size, disposition, r2_key, created_at) VALUES (?, ?, 'f.txt', 'text/plain', 8, 'attachment', ?, 1)", attachmentId, messageId, key]);
+		return key;
+	};
+	const draftUid = async (id) => (await op("openImapFolder", purger, "drafts")).messages.find((entry) => entry.messageId === id)?.uid ?? null;
+	const inR2 = async (key) => !!(await bucket.get(key));
+	const rowExists = async (id) => (await sql(["SELECT COUNT(*) AS n FROM messages WHERE id = ?", id]))[0][0].n === 1;
+
+	await putMessage("pd-1", "draft");
+	const firstDraftUid = await draftUid("pd-1");
+	await sql(["UPDATE messages SET subject = subject, read = 1 WHERE id = 'pd-1'"]);
+	check("bp0004: an identical save and a read change keep the Drafts UID", (await draftUid("pd-1")) === firstDraftUid);
+	await sql(["UPDATE messages SET text_body = 'edited on D1' WHERE id = 'pd-1'"]);
+	const editedUid = (await sql(["SELECT COUNT(*) AS n FROM imap_message_uids u JOIN imap_folders f ON f.id = u.imap_folder_id WHERE f.folder_key = 'drafts' AND u.message_id = 'pd-1'"]))[0][0].n;
+	const secondDraftUid = await draftUid("pd-1");
+	check("bp0004: a content edit releases the Drafts UID in the same statement; the draft gets a new UID", editedUid === 0 && secondDraftUid > firstDraftUid, [editedUid, firstDraftUid, secondDraftUid]);
+	await putAttachment("pd-1", "pd-att-1");
+	const afterAdd = await sql(["SELECT COUNT(*) AS n FROM imap_message_uids WHERE message_id = 'pd-1'"]);
+	const thirdDraftUid = await draftUid("pd-1");
+	await sql(["DELETE FROM message_attachments WHERE id = 'pd-att-1'"]);
+	const afterRemove = await sql(["SELECT COUNT(*) AS n FROM imap_message_uids WHERE message_id = 'pd-1'"]);
+	check("bp0004: attachment insert and delete each release the Drafts UID", afterAdd[0][0].n === 0 && afterRemove[0][0].n === 0 && thirdDraftUid > secondDraftUid, [afterAdd, afterRemove]);
+
+	// One Trash message: row, raw bytes, attachment, search index, JMAP revision, stale mapping elsewhere.
+	await putMessage("pt-1", "trash");
+	await putMessage("pt-keep", "trash");
+	const pt1Attachment = await putAttachment("pt-1", "pt-att-1");
+	const pTrash = await op("openImapFolder", purger, "trash");
+	const pt1Uid = pTrash.messages.find((entry) => entry.messageId === "pt-1").uid;
+	await sql(["INSERT INTO imap_folders (id, mailbox_id, folder_key, uid_validity, uid_next, created_at) VALUES ('P-ar', 'mbx-p', 'archive', 5, 2, 1)"], ["INSERT INTO imap_message_uids (imap_folder_id, uid, message_id, created_at) VALUES ('P-ar', 1, 'pt-1', 1)"]);
+	const revisionOf = async () => Number((await sql(["SELECT revision FROM jmap_mailbox_revisions WHERE mailbox_id = 'mbx-p'"]))[0][0]?.revision ?? 0);
+	const pRevision = await revisionOf();
+	check("STORE \\Deleted in Trash is allowed and deletes nothing", (await op("store", purger, "trash", [pt1Uid], { mode: "add", flags: ["deleted"] }))[pt1Uid]?.deleted === true && (await rowExists("pt-1")));
+	const purged = await op("expungeImapFolder", purger, "trash", pTrash.uidNext - 1);
+	check("permanent EXPUNGE in Trash deletes exactly the marked message", same(purged, [pt1Uid]) && !(await rowExists("pt-1")) && (await rowExists("pt-keep")), purged);
+	check("its raw bytes and attachment object are removed from R2 after the commit", !(await inR2("inbound/pt-1.eml")) && !(await inR2(pt1Attachment)) && (await inR2("inbound/pt-keep.eml")));
+	check("attachment rows cascade; the stale Archive mapping is removed explicitly", (await sql(["SELECT COUNT(*) AS n FROM message_attachments WHERE message_id = 'pt-1'"]))[0][0].n === 0 && (await sql(["SELECT COUNT(*) AS n FROM imap_message_uids WHERE message_id = 'pt-1'"]))[0][0].n === 0);
+	check("FTS no longer finds it; the JMAP revision moved", (await sql(["SELECT COUNT(*) AS n FROM messages_fts WHERE messages_fts MATCH 'pt'"]))[0][0].n === (await sql(["SELECT COUNT(*) AS n FROM messages WHERE subject LIKE 'subject pt%'"]))[0][0].n && (await revisionOf()) > pRevision);
+	check("a repeated EXPUNGE deletes nothing", same(await op("expungeImapFolder", purger, "trash", pTrash.uidNext - 1), []));
+
+	// One Draft: the author's own; another user's draft is refused.
+	await putMessage("pd-own", "draft");
+	await putMessage("pd-other", "draft", { userId: "user-b" });
+	const ownUid = await draftUid("pd-own");
+	const otherUid = await draftUid("pd-other");
+	check("\\Deleted on another user's draft is denied", (await op("store", purger, "drafts", [otherUid], { mode: "add", flags: ["deleted"] })).code === "denied");
+	await op("store", purger, "drafts", [ownUid], { mode: "add", flags: ["deleted"] });
+	await sql(["UPDATE imap_message_uids SET deleted = 1 WHERE message_id = 'pd-other'"]);
+	const draftPurge = await op("expungeImapFolder", purger, "drafts", 100000);
+	check("permanent EXPUNGE in Drafts deletes the author's draft only, even with a foreign mark", same(draftPurge, [ownUid]) && !(await rowExists("pd-own")) && (await rowExists("pd-other")), draftPurge);
+
+	// A full chunk of 25, then 30 (25 + 5), with D1's bound-parameter counts recorded.
+	const fullIds = Array.from({ length: 25 }, (_, index) => `pf-${String(index).padStart(2, "0")}`);
+	for (const id of fullIds) await putMessage(id, "trash");
+	const fullAttachment = await putAttachment("pf-00", "pf-att");
+	const fullView = await op("openImapFolder", purger, "trash");
+	const fullUids = fullView.messages.filter((entry) => entry.messageId.startsWith("pf-")).map((entry) => entry.uid);
+	await op("store", purger, "trash", fullUids, { mode: "add", flags: ["deleted"] });
+	const fullResult = await op("permanent", "mbx-p", "trash", fullUids, 1000000, authority);
+	check("a full 25-UID chunk deletes 25 in one D1 batch", fullResult.deleted?.length === 25 && same(fullResult.released, fullUids), fullResult.error ?? fullResult.deleted?.length);
+	check(`every statement binds under D1's 100 parameters (max ${Math.max(...(fullResult.counts ?? [999]))})`, fullResult.counts?.length === 4 && fullResult.counts.every((count) => count < 100), fullResult.counts);
+	check("S1 captured the attachment key before the cascade (RETURNING cannot see it on D1)", same(fullResult.deleted?.find((row) => row.messageId === "pf-00")?.attachmentKeys, [fullAttachment]));
+	const cleaned = await op("cleanup", fullResult.deleted);
+	check("post-commit cleanup removes the 25 raw objects and the attachment from R2", cleaned.removed?.length === 26 && cleaned.failed.length === 0 && !(await inR2(fullAttachment)) && !(await inR2("inbound/pf-00.eml")), cleaned);
+	const moreIds = Array.from({ length: 30 }, (_, index) => `pm-${String(index).padStart(2, "0")}`);
+	for (const id of moreIds) await putMessage(id, "trash");
+	const moreView = await op("openImapFolder", purger, "trash");
+	const moreUids = moreView.messages.filter((entry) => entry.messageId.startsWith("pm-")).map((entry) => entry.uid);
+	await op("store", purger, "trash", moreUids, { mode: "add", flags: ["deleted"] });
+	const moreResult = await op("expungeImapFolder", purger, "trash", moreView.uidNext - 1);
+	check("30 UIDs expunge in two chunks (25 + 5) on D1", same(moreResult, moreUids) && (await sql(["SELECT COUNT(*) AS n FROM messages WHERE id LIKE 'pm-%'"]))[0][0].n === 0, moreResult.error ?? moreResult.length);
+
+	// Compare-and-set misses: a cleared mark, a stale UID, a revoked credential, a foreign authority.
+	await putMessage("pc-1", "trash");
+	const pcUid = (await op("openImapFolder", purger, "trash")).messages.find((entry) => entry.messageId === "pc-1").uid;
+	await op("store", purger, "trash", [pcUid], { mode: "add", flags: ["deleted"] });
+	await sql(["UPDATE imap_message_uids SET deleted = 0 WHERE message_id = 'pc-1'"]);
+	check("CAS miss: a cleared mark deletes nothing", same((await op("permanent", "mbx-p", "trash", [pcUid], 1000000, authority)).deleted, []) && (await rowExists("pc-1")));
+	await sql(["UPDATE imap_message_uids SET deleted = 1 WHERE message_id = 'pc-1'"]);
+	check("CAS miss: a UID above the announced range deletes nothing", same((await op("permanent", "mbx-p", "trash", [pcUid], pcUid - 1, authority)).deleted, []) && (await rowExists("pc-1")));
+	check("CAS miss: an app password that no longer exists deletes nothing", same((await op("permanent", "mbx-p", "trash", [pcUid], 1000000, { ...authority, appPasswordId: "map-gone" })).deleted, []) && (await rowExists("pc-1")));
+	check("CAS miss: a user without ownership or full access deletes nothing", same((await op("permanent", "mbx-p", "trash", [pcUid], 1000000, { ...authority, userId: "user-b", appPasswordId: undefined })).deleted, []) && (await rowExists("pc-1")));
+
+	// Rollback: a statement failing inside the batch undoes the delete, and nothing is cleaned.
+	await sql(["CREATE TRIGGER check_injected_failure BEFORE DELETE ON imap_message_uids BEGIN SELECT RAISE(ABORT, 'injected failure'); END"]);
+	const rolledBack = await op("expungeImapFolder", purger, "trash", 1000000);
+	await sql(["DROP TRIGGER check_injected_failure"]);
+	check("a failing statement rolls the whole batch back on D1; bytes untouched", /injected failure/.test(rolledBack.error ?? "") && (await rowExists("pc-1")) && (await inR2("inbound/pc-1.eml")), rolledBack);
+
+	// Concurrency: two EXPUNGEs, EXPUNGE vs MOVE out of Trash, EXPUNGE vs -FLAGS \Deleted.
+	const raceIds = Array.from({ length: 12 }, (_, index) => `pr-${String(index).padStart(2, "0")}`);
+	for (const id of raceIds) await putMessage(id, "trash");
+	const raceView = await op("openImapFolder", purger, "trash");
+	const raceUids = raceView.messages.filter((entry) => entry.messageId.startsWith("pr-")).map((entry) => entry.uid);
+	await op("store", purger, "trash", raceUids, { mode: "add", flags: ["deleted"] });
+	const [raceA, raceB, raceMove, raceClear] = await Promise.all([
+		op("expungeImapFolder", purger, "trash", 1000000),
+		op("expungeImapFolder", purger, "trash", 1000000),
+		op("moveImapMessages", purger, "trash", raceUids.slice(0, 4), "inbox"),
+		op("store", purger, "trash", raceUids.slice(4, 8), { mode: "remove", flags: ["deleted"] }),
+	]);
+	const raceRows = (await sql([`SELECT id, status, raw_r2_key FROM messages WHERE id LIKE 'pr-%' ORDER BY id`]))[0];
+	let bytesConsistent = true;
+	for (const row of raceRows) if (!(await inR2(row.raw_r2_key))) bytesConsistent = false;
+	const survivors = new Set(raceRows.map((row) => row.id));
+	let deletedBytesGone = true;
+	for (const id of raceIds.filter((id) => !survivors.has(id))) if (await inR2(`inbound/${id}.eml`)) deletedBytesGone = false;
+	check("racing EXPUNGEs, MOVE and -\\Deleted: both EXPUNGEs answer, every surviving row keeps its bytes, every deleted one's bytes are gone", Array.isArray(raceA) && Array.isArray(raceB) && bytesConsistent && deletedBytesGone && raceRows.every((row) => row.status === "received" || row.status === "trash"), { raceA, raceB, raceMove, raceClear: raceClear.error ?? "ok", rows: raceRows.length });
+	check("a moved-out message is never deleted", raceRows.filter((row) => row.status === "received").length === (raceMove.moved?.length ?? 0), raceMove);
+
+	// Fail closed on D1 (pc-1 was still marked, so the racing EXPUNGEs above removed it: use a fresh one).
+	await putMessage("pc-2", "trash");
+	const pc2Uid = (await op("openImapFolder", purger, "trash")).messages.find((entry) => entry.messageId === "pc-2").uid;
+	await op("store", purger, "trash", [pc2Uid], { mode: "add", flags: ["deleted"] });
+	const bp0003Sql = (await sql(["SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'bp_imap_membership_clears_deleted'"]))[0][0].sql;
+	await sql(["DROP TRIGGER bp_imap_membership_clears_deleted"]);
+	const noBp0003 = [await op("expungeImapFolder", purger, "trash", 1000000), await op("permanent", "mbx-p", "trash", [pc2Uid], 1000000, authority)];
+	check("without bp0003: Trash EXPUNGE is unsupported and the primitive deletes nothing", noBp0003[0].code === "unsupported" && same(noBp0003[1].deleted, []) && (await rowExists("pc-2")), noBp0003);
+	await sql([bp0003Sql]);
+	await putMessage("pd-f", "draft");
+	const pdfUid = await draftUid("pd-f");
+	await op("store", purger, "drafts", [pdfUid], { mode: "add", flags: ["deleted"] });
+	const bp0004Sql = (await sql(["SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'bp_imap_draft_attachment_added_releases_uid'"]))[0][0].sql;
+	await sql(["DROP TRIGGER bp_imap_draft_attachment_added_releases_uid"]);
+	const noBp0004 = [await op("expungeImapFolder", purger, "drafts", 1000000), await op("permanent", "mbx-p", "drafts", [pdfUid], 1000000, authority), await rowExists("pd-f"), await op("expungeImapFolder", purger, "trash", 1000000), await rowExists("pc-2")];
+	check("without one bp0004 trigger: Drafts is unsupported, the primitive deletes nothing, Trash still works", noBp0004[0].code === "unsupported" && same(noBp0004[1].deleted, []) && noBp0004[2] && same(noBp0004[3], [pc2Uid]) && !noBp0004[4], noBp0004);
+	await sql([bp0004Sql]);
+	check("with bp0004 restored the draft can be purged", same(await op("expungeImapFolder", purger, "drafts", 1000000), [pdfUid]) && !(await rowExists("pd-f")));
+
 	console.log("Fail-closed without bp0003 (D1)");
-	const triggerSql = onMessages[0].sql;
+	const triggerSql = onMessages.find((trigger) => trigger.name === "bp_imap_membership_clears_deleted").sql;
 	await sql(["DROP TRIGGER bp_imap_membership_clears_deleted"]);
 	check("\\Deleted is not a permanent flag anywhere", (await op("listImapMailboxes", owner)).every((mailbox) => !mailbox.permanentFlags.includes("deleted")));
 	check("STORE \\Deleted is unsupported", (await op("store", owner, "inbox", [xUid], { mode: "remove", flags: ["deleted"] })).code === "unsupported");
@@ -430,11 +600,20 @@ try {
 	check("another mailbox's folders are unreachable", (await op("openImapFolder", { userId: "user-b", mailboxId: "mbx-a" }, "inbox")).code === "forbidden");
 	check("a revoked delegate's STORE is forbidden, not denied", (await op("store", { userId: "user-b", mailboxId: "mbx-s" }, "inbox", [1], { mode: "add", flags: ["seen"] })).code === "forbidden");
 
+	console.log("bp0004 upgrade of an existing D1 database (Workers runner)");
+	const draftTriggers = (await sql(["SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'bp_imap_draft_%' ORDER BY name"]))[0];
+	await sql(...draftTriggers.map((trigger) => [`DROP TRIGGER ${trigger.name}`]), ["DELETE FROM d1_migrations WHERE name = 'bp0004_release_imap_draft_uid_on_content_change.sql'"]);
+	const upgraded = await op("migrate");
+	check("a database at bp0003 (with data) applies exactly bp0004", upgraded.ready && same(upgraded.applied, ["bp0004_release_imap_draft_uid_on_content_change.sql"]), upgraded);
+	check("the upgrade installs the three certified triggers verbatim", same((await sql(["SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'bp_imap_draft_%' ORDER BY name"]))[0], draftTriggers));
+	check("a second run applies nothing", (await op("migrate")).applied.length === 0);
+
 	console.log("Backup round trip and restart");
 	const beforeBackup = await op("openImapFolder", owner, "inbox");
 	check("backup export + restore on D1", (await op("roundTrip")) === true);
 	const restored = await op("openImapFolder", owner, "inbox");
 	check("UIDVALIDITY, UIDNEXT and UIDs preserved", restored.uidValidity === beforeBackup.uidValidity && restored.uidNext === beforeBackup.uidNext && same(restored.messages, beforeBackup.messages));
+	check("the bp0003 and bp0004 triggers survive a backup restore", (await sql(["SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name IN ('bp_imap_membership_clears_deleted', 'bp_imap_draft_content_releases_uid', 'bp_imap_draft_attachment_added_releases_uid', 'bp_imap_draft_attachment_removed_releases_uid')"]))[0][0].n === 4);
 	await mf.dispose();
 	mf = start();
 	const restarted = await op("openImapFolder", owner, "inbox");

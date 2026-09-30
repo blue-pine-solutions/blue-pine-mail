@@ -35,14 +35,15 @@ import type { FetchItem, FramedItem, FramerLimits, ImapSessionHost, SelectedMail
  * - \Seen and \Flagged, the product's own read and starred state, through A3's
  *   storeImapFlags: STORE, and the implicit \Seen of a non-PEEK body fetch;
  * - \Deleted, through the same STORE, where A3 lists it among the permanent flags
- *   (management access, not Trash or Drafts, bp0003 installed);
- * - recoverable EXPUNGE and CLOSE (A5.2a): A3's expungeImapFolder moves \Deleted messages to
- *   Trash;
+ *   (management access and bp0003 installed; in Drafts also bp0004, and only on the
+ *   principal's own drafts);
+ * - EXPUNGE and CLOSE through A3's expungeImapFolder: recoverable (A5.2a, \Deleted messages
+ *   move to Trash) everywhere but Trash and Drafts, where they delete permanently (A5.2c,
+ *   database rows first, stored objects after the commit, best effort);
  * - MOVE and UID MOVE (A5.2b, RFC 6851): A3's moveImapMessages, under its special-folder
  *   policy, then the spam training a move into or out of Spam stands for.
- * Nothing is ever deleted permanently. Every other command that would write (COPY, APPEND,
- * UID EXPUNGE, folder management) is refused before any storage call; UIDPLUS is not
- * offered, so MOVE sends no COPYUID.
+ * Every other command that would write (COPY, APPEND, UID EXPUNGE, folder management) is
+ * refused before any storage call; UIDPLUS is not offered, so MOVE sends no COPYUID.
  */
 
 /** Capabilities before authentication. Each is implemented and tested (tests/imap-listener.test.mjs). */
@@ -540,7 +541,7 @@ export class ImapSession {
 		}
 		const uids = snapshot.messages.map((entry) => entry.uid);
 		// What STORE may change here: A3's permanent flags for this access and folder (\Deleted
-		// only for managers, outside Trash and Drafts, with bp0003 installed). EXAMINE changes nothing.
+		// only for managers with bp0003 installed, in Drafts also bp0004). EXAMINE changes nothing.
 		const permanent = command === "SELECT" ? STORABLE_FLAGS.filter((flag) => snapshot.mailbox.permanentFlags.includes(flag)) : [];
 		const readOnly = permanent.length === 0;
 		this.selected = {
@@ -757,12 +758,14 @@ export class ImapSession {
 	}
 
 	/**
-	 * EXPUNGE (RFC 3501 §6.4.3), recoverable (A5.2a): A3 moves the messages marked \Deleted to
-	 * Trash. The view is refreshed without EXPUNGE first, so only UIDs this session has
-	 * announced are candidates, then every message that has left the folder, by this command
-	 * or otherwise, is reported with EXPUNGE, highest sequence number first. A refusal
-	 * (NOPERM without management access, CANNOT in Trash, in Drafts or without bp0003) moves
-	 * nothing; a chunk refused after earlier chunks moved still reports what moved.
+	 * EXPUNGE (RFC 3501 §6.4.3): A3 moves the messages marked \Deleted to Trash (A5.2a), or in
+	 * Trash and Drafts deletes them permanently (A5.2c). The view is refreshed without EXPUNGE
+	 * first, so only UIDs this session has announced are candidates, then every message that
+	 * has left the folder, by this command or otherwise, is reported with EXPUNGE, highest
+	 * sequence number first. A refusal (NOPERM without management access, CANNOT without
+	 * bp0003, or in Drafts without bp0004) changes nothing; a chunk refused after earlier
+	 * chunks committed still reports what they removed. Object-storage cleanup after a
+	 * permanent deletion never affects the answer.
 	 */
 	private async expunge(tag: string): Promise<void> {
 		const selected = this.selected!;
@@ -780,12 +783,12 @@ export class ImapSession {
 	}
 
 	/**
-	 * CLOSE (RFC 3501 §6.4.2): under SELECT, the same recoverable expunge as EXPUNGE, without
-	 * any untagged response, then back to the authenticated state. Nothing is expunged under
-	 * EXAMINE, in Trash or Drafts, without bp0003, or for a principal that no longer has
-	 * management access; those simply close. If moving fails, the mailbox stays selected, the
-	 * answer is NO and the \Deleted marks that did not move are kept. Lost access ends the
-	 * session, as everywhere.
+	 * CLOSE (RFC 3501 §6.4.2): under SELECT, the same expunge as EXPUNGE (recoverable, or
+	 * permanent in Trash and Drafts), without any untagged response, then back to the
+	 * authenticated state. Nothing is expunged under EXAMINE, without bp0003 (in Drafts,
+	 * bp0004), or for a principal that no longer has management access; those simply close.
+	 * If the expunge fails, the mailbox stays selected, the answer is NO and the \Deleted
+	 * marks that were not acted on are kept. Lost access ends the session, as everywhere.
 	 */
 	private async close(tag: string): Promise<void> {
 		const selected = this.selected!;

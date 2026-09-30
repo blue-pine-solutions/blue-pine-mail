@@ -21,15 +21,25 @@ const DOWNSTREAM_NAME = /^bp(\d{4})_[a-z0-9_]+\.sql$/;
 const upstreamFiles = files.filter((name) => UPSTREAM_NAME.test(name));
 const downstreamFiles = files.filter((name) => DOWNSTREAM_NAME.test(name)).sort();
 /** Upstream tables Blue Pine migrations attach foreign keys or triggers to. */
-const ANCHORED_UPSTREAM_TABLES = ["users", "mailboxes", "domains", "mailbox_access", "messages"];
+const ANCHORED_UPSTREAM_TABLES = ["users", "mailboxes", "domains", "mailbox_access", "messages", "message_attachments"];
 /**
  * Anchored tables where only the named, certified Blue Pine triggers may attach, and no
- * foreign key may (UPSTREAM.md, "IMAP \Deleted invariant (bp0003)"). Anything else on these
- * tables needs its own certification and an entry here first.
+ * foreign key may (UPSTREAM.md, "IMAP \Deleted invariant (bp0003)" and "IMAP draft UID
+ * invariant (bp0004)"). Anything else on these tables needs its own certification and an
+ * entry here first.
  */
-const CERTIFIED_ONLY = { messages: ["bp_imap_membership_clears_deleted"] };
+const CERTIFIED_ONLY = {
+	messages: ["bp_imap_membership_clears_deleted", "bp_imap_draft_content_releases_uid"],
+	message_attachments: ["bp_imap_draft_attachment_added_releases_uid", "bp_imap_draft_attachment_removed_releases_uid"],
+};
 /** The exact certified bp0003 trigger, as SQLite stores it. */
 const MEMBERSHIP_TRIGGER_SQL = "CREATE TRIGGER `bp_imap_membership_clears_deleted` AFTER UPDATE OF `mailbox_id`, `status`, `folder_id` ON `messages`\nWHEN OLD.`mailbox_id` IS NOT NEW.`mailbox_id` OR OLD.`status` IS NOT NEW.`status` OR OLD.`folder_id` IS NOT NEW.`folder_id`\nBEGIN\n\tUPDATE `imap_message_uids` SET `deleted` = 0 WHERE `message_id` = NEW.`id` AND `deleted` = 1;\nEND";
+/** The exact certified bp0004 triggers, as SQLite stores them. */
+const DRAFT_TRIGGERS_SQL = {
+	bp_imap_draft_content_releases_uid: "CREATE TRIGGER `bp_imap_draft_content_releases_uid` AFTER UPDATE OF `from_addr`, `to_addr`, `cc_addr`, `bcc_addr`, `subject`, `text_body`, `html_body`, `in_reply_to`, `references_header` ON `messages`\nWHEN OLD.`from_addr` IS NOT NEW.`from_addr` OR OLD.`to_addr` IS NOT NEW.`to_addr` OR OLD.`cc_addr` IS NOT NEW.`cc_addr` OR OLD.`bcc_addr` IS NOT NEW.`bcc_addr` OR OLD.`subject` IS NOT NEW.`subject` OR OLD.`text_body` IS NOT NEW.`text_body` OR OLD.`html_body` IS NOT NEW.`html_body` OR OLD.`in_reply_to` IS NOT NEW.`in_reply_to` OR OLD.`references_header` IS NOT NEW.`references_header`\nBEGIN\n\tDELETE FROM `imap_message_uids` WHERE `message_id` = NEW.`id` AND `imap_folder_id` IN (SELECT `id` FROM `imap_folders` WHERE `folder_key` = 'drafts' AND `mailbox_id` IN (OLD.`mailbox_id`, NEW.`mailbox_id`));\nEND",
+	bp_imap_draft_attachment_added_releases_uid: "CREATE TRIGGER `bp_imap_draft_attachment_added_releases_uid` AFTER INSERT ON `message_attachments`\nWHEN EXISTS (SELECT 1 FROM `messages` WHERE `id` = NEW.`message_id` AND `status` = 'draft')\nBEGIN\n\tDELETE FROM `imap_message_uids` WHERE `message_id` = NEW.`message_id` AND `imap_folder_id` IN (SELECT `id` FROM `imap_folders` WHERE `folder_key` = 'drafts' AND `mailbox_id` = (SELECT `mailbox_id` FROM `messages` WHERE `id` = NEW.`message_id`));\nEND",
+	bp_imap_draft_attachment_removed_releases_uid: "CREATE TRIGGER `bp_imap_draft_attachment_removed_releases_uid` AFTER DELETE ON `message_attachments`\nWHEN EXISTS (SELECT 1 FROM `messages` WHERE `id` = OLD.`message_id` AND `status` = 'draft')\nBEGIN\n\tDELETE FROM `imap_message_uids` WHERE `message_id` = OLD.`message_id` AND `imap_folder_id` IN (SELECT `id` FROM `imap_folders` WHERE `folder_key` = 'drafts' AND `mailbox_id` = (SELECT `mailbox_id` FROM `messages` WHERE `id` = OLD.`message_id`));\nEND",
+};
 const downstreamTables = [...read("src/db/schema/bluepine.ts").matchAll(/sqliteTable\(\s*"([^"]+)"/g)].map((match) => match[1]);
 
 const generated = spawnSync(process.execPath, [join(root, "scripts", "generate-migration-bundle.mjs")], { encoding: "utf8" });
@@ -116,8 +126,9 @@ test("Blue Pine migrations only create their own objects and never alter or drop
 });
 
 test("Blue Pine migrations attach triggers and foreign keys only to the anchored upstream tables", () => {
-	// IMAP state (bp0002) reads `messages` and `folders` by join; the only attachment to
-	// `messages` is bp0003's certified \Deleted invariant, and nothing attaches to `folders`.
+	// IMAP state (bp0002) reads `messages` and `folders` by join; the only attachments to
+	// `messages` and `message_attachments` are bp0003's and bp0004's certified triggers, and
+	// nothing attaches to `folders`.
 	for (const name of downstreamFiles) {
 		const sql = readFileSync(join(migrationsDirectory, name), "utf8").replace(/--[^\n]*/g, "");
 		const triggers = [...sql.matchAll(/\bCREATE\s+TRIGGER\s+[`"]?(\w+)[`"]?[^;]*?\bON\s+[`"]?(\w+)/gi)].map((match) => ({ trigger: match[1], table: match[2] }));
@@ -130,11 +141,19 @@ test("Blue Pine migrations attach triggers and foreign keys only to the anchored
 	}
 });
 
-test("bp0003's trigger on messages is exactly the certified \\Deleted invariant, and it is the only Blue Pine object on messages", async (t) => {
+test("bp0003's and bp0004's triggers are exactly the certified invariants, and the only Blue Pine objects on messages and message_attachments", async (t) => {
 	const database = openDatabase(t);
 	await app.applyMigrations(database, migrationsDirectory);
-	const onMessages = database.db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'messages' AND name LIKE 'bp\\_%' ESCAPE '\\'").all();
-	assert.deepEqual(onMessages, [{ name: "bp_imap_membership_clears_deleted", sql: MEMBERSHIP_TRIGGER_SQL }]);
+	const on = (table) => database.db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? AND name LIKE 'bp\\_%' ESCAPE '\\' ORDER BY name").all(table);
+	assert.deepEqual(on("messages"), [
+		{ name: "bp_imap_draft_content_releases_uid", sql: DRAFT_TRIGGERS_SQL.bp_imap_draft_content_releases_uid },
+		{ name: "bp_imap_membership_clears_deleted", sql: MEMBERSHIP_TRIGGER_SQL },
+	]);
+	assert.deepEqual(on("message_attachments"), [
+		{ name: "bp_imap_draft_attachment_added_releases_uid", sql: DRAFT_TRIGGERS_SQL.bp_imap_draft_attachment_added_releases_uid },
+		{ name: "bp_imap_draft_attachment_removed_releases_uid", sql: DRAFT_TRIGGERS_SQL.bp_imap_draft_attachment_removed_releases_uid },
+	]);
+	assert.equal(database.db.prepare("SELECT COUNT(*) AS n FROM pragma_foreign_key_list('message_attachments') WHERE \"table\" LIKE 'imap%'").get().n, 0);
 	assert.equal(database.db.prepare("SELECT COUNT(*) AS n FROM pragma_foreign_key_list('imap_message_uids') WHERE \"table\" = 'messages'").get().n, 0, "imap_message_uids has no foreign key to messages");
 });
 
@@ -204,6 +223,9 @@ test("a migrated database has the Blue Pine table, indexes and triggers, and eve
 	const names = (type) => database.db.prepare("SELECT name FROM sqlite_master WHERE type = ? ORDER BY name").all(type).map((row) => row.name);
 	for (const table of downstreamTables) assert.ok(names("table").includes(table), table);
 	assert.deepEqual(names("trigger").filter((name) => name.startsWith("bp_")), [
+		"bp_imap_draft_attachment_added_releases_uid",
+		"bp_imap_draft_attachment_removed_releases_uid",
+		"bp_imap_draft_content_releases_uid",
 		"bp_imap_folders_monotonic",
 		"bp_imap_membership_clears_deleted",
 		"bp_imap_message_uids_advance_uid_next",
@@ -226,4 +248,55 @@ test("UPSTREAM.md documents the namespace and lists every Blue Pine migration", 
 	assert.match(upstream, /## Downstream migrations/);
 	assert.match(upstream, /bpNNNN_<snake_case_description>\.sql/);
 	for (const name of downstreamFiles) assert.ok(upstream.includes(`\`${name}\``), `UPSTREAM.md lists ${name}`);
+});
+
+test("bp0004's content trigger watches exactly the columns draftFingerprint digests, every one of which exists, and attachment rows are never updated in place", async (t) => {
+	// The fingerprint's row fields, from src/lib/email/canonical-message-utils.ts, mapped to
+	// their `messages` columns through the upstream schema.
+	const utilsSource = read("src/lib/email/canonical-message-utils.ts");
+	const material = /const material = JSON\.stringify\(\[([\s\S]*?)attachments\.map/.exec(utilsSource)[1];
+	const fields = [...material.matchAll(/row\.(\w+)/g)].map((match) => match[1]);
+	const schema = read("src/db/schema/index.ts");
+	const messagesTable = schema.slice(schema.indexOf("export const messages = sqliteTable("), schema.indexOf("export const", schema.indexOf("export const messages = sqliteTable(") + 1));
+	const columns = fields.map((field) => new RegExp(`\\b${field}: text\\("(\\w+)"\\)`).exec(messagesTable)?.[1]);
+	assert.ok(columns.every(Boolean), `every fingerprint field is a messages column: ${fields.join(", ")}`);
+	const trigger = DRAFT_TRIGGERS_SQL.bp_imap_draft_content_releases_uid;
+	const watched = /AFTER UPDATE OF (.*) ON `messages`/.exec(trigger)[1].split(", ").map((column) => column.replace(/`/g, ""));
+	const compared = [...trigger.matchAll(/OLD\.`(\w+)` IS NOT NEW\.`\1`/g)].map((match) => match[1]);
+	assert.deepEqual(watched, columns, "UPDATE OF lists the fingerprint's columns in order");
+	assert.deepEqual(compared, columns, "WHEN compares every one of them");
+	const database = openDatabase(t);
+	await app.applyMigrations(database, migrationsDirectory);
+	const existing = database.db.prepare("SELECT name FROM pragma_table_info('messages')").all().map((row) => row.name);
+	// SQLite does not validate an UPDATE OF column list, so a misspelt column would silently never fire.
+	for (const column of columns) assert.ok(existing.includes(column), `messages.${column} exists`);
+	assert.ok(/draftFingerprint[\s\S]*?attachment\.id, attachment\.filename, attachment\.contentType, attachment\.size, attachment\.disposition, attachment\.contentId/.test(utilsSource), "the fingerprint covers attachments by their immutable row");
+	const sources = spawnSync("grep", ["-rlE", "update\\(messageAttachments\\)|UPDATE\\s+`?message_attachments", join(root, "src"), join(root, "server")], { encoding: "utf8" });
+	assert.equal(sources.stdout.trim(), "", "no code updates message_attachments rows in place (bp0004 watches INSERT and DELETE only)");
+});
+
+test("bp0004 upgrade: a database at bp0003 applies exactly bp0004 on both runners, a restart applies nothing, and it ends with the fresh schema", async (t) => {
+	const bp0004 = "bp0004_release_imap_draft_uid_on_content_change.sql";
+	assert.ok(downstreamFiles.includes(bp0004));
+	const before = mkdtempSync(join(tmpdir(), "mailflare-pre-bp0004-"));
+	t.after(() => rmSync(before, { recursive: true, force: true }));
+	cpSync(migrationsDirectory, before, { recursive: true });
+	for (const name of downstreamFiles.slice(downstreamFiles.indexOf(bp0004))) rmSync(join(before, name));
+	const schema = (database) => database.db.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
+	const fresh = openDatabase(t);
+	await app.applyMigrations(fresh, migrationsDirectory);
+
+	const node = openDatabase(t);
+	await app.applyMigrations(node, before);
+	assert.equal(node.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'bp_imap_draft_%'").get().n, 0);
+	assert.deepEqual(await app.applyMigrations(node, migrationsDirectory), [bp0004], "Node runner: exactly bp0004");
+	assert.deepEqual(await app.applyMigrations(node, migrationsDirectory), [], "a restart applies nothing");
+	assert.deepEqual(schema(node), schema(fresh));
+
+	const workers = openDatabase(t);
+	await app.applyMigrations(workers, before);
+	assert.deepEqual((await app.getMigrationStatus(workers)).pending, [bp0004]);
+	assert.deepEqual((await app.applyPendingMigrations(workers)).applied, [bp0004], "Workers runner: exactly bp0004");
+	assert.deepEqual((await app.applyPendingMigrations(workers)).applied, []);
+	assert.deepEqual(schema(workers).filter((row) => row.type === "trigger").map((row) => [row.name, row.sql.replace(/\s+/g, " ")]), schema(fresh).filter((row) => row.type === "trigger").map((row) => [row.name, row.sql.replace(/\s+/g, " ")]), "the bundle runner installs the same triggers");
 });

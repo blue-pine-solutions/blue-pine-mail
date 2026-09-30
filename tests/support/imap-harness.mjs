@@ -44,6 +44,12 @@ export async function loadApp(name) {
 				export { handleJmapRequest } from "./src/lib/jmap/handler.ts";
 				export { encodeMailboxRef } from "./src/lib/jmap/ids.ts";
 				export * as spamFeedback from "./src/lib/spam/feedback.ts";
+				export { PATCH as draftPatchRoute, DELETE as draftDeleteRoute } from "./src/app/api/drafts/[id]/route.ts";
+				export { storeMessageAttachments, deleteMessageAttachment } from "./src/lib/email/attachments.ts";
+				export { cleanupDeletedMessageObjects } from "./src/lib/imap/cleanup.ts";
+				export * as imapState from "./src/lib/imap/state.ts";
+				export * as imapUtils from "./src/lib/imap/utils.ts";
+				export { getDb } from "./src/db/index.ts";
 				export { default as PostalMime } from "postal-mime";
 			`,
 			resolveDir: root,
