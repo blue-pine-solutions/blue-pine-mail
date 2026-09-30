@@ -33,6 +33,35 @@ Optional: `SMTP_TLS_KEY` and `SMTP_TLS_CERT` (paths inside the container) enable
 
 **Cloudflare Email Sending.** `CF_ACCOUNT_ID` plus a `CF_TOKEN` with Email Sending: Edit. The domain must be a Cloudflare zone with Email Sending set up; the server calls the REST API, no Workers plan needed.
 
+## Mail clients over IMAP (read-only)
+
+The container can serve IMAP4rev1 to desktop and phone mail clients. It is **read-only** in this version: clients can list folders, open and search mail and download attachments, but cannot change anything. Marking read or flagged, moving, copying, deleting, creating folders and uploading (APPEND) are refused, and opening a message does not mark it read. There is no SMTP submission service yet, so a client cannot send mail; use the web app for that, and set clients up with IMAP only.
+
+IMAP is off unless you turn it on, and it only speaks **implicit TLS** (IMAPS, port 993). There is no plaintext port 143 and no STARTTLS.
+
+```bash
+IMAP_PORT=993
+IMAP_TLS_CERT=/data/tls/fullchain.pem   # PEM certificate chain
+IMAP_TLS_KEY=/data/tls/privkey.pem      # PEM private key
+```
+
+Mount the certificate files into the container (a volume or Docker secrets); a Let's Encrypt `fullchain.pem`/`privkey.pem` pair works as is. The certificate must cover the hostname clients connect to. If `IMAP_PORT` is set and the files are missing, unreadable, not PEM, or do not belong together, the server refuses to start and says why. After renewing the certificate, send the process `SIGHUP` (`docker compose kill -s HUP mailflare`) to load the new files without dropping connections, or restart the container; an invalid replacement is ignored and the current certificate stays in use.
+
+Publish the port in `docker-compose.yml` alongside the existing ones:
+
+```yaml
+    ports:
+      - "993:993"     # IMAP over TLS (read-only)
+```
+
+The application keeps running as the unprivileged `node` user; Docker lets containers bind low ports without root, as it already does for port 25. Map the port directly rather than through a TCP proxy, so the listener sees each client's address for its limits.
+
+**Signing in.** The username is the mailbox address (for example `ann@example.com`). The password is a **mail app password** created in the web app under **Settings → App passwords** (Mail app passwords) with the **IMAP** scope, for that mailbox. The account's web password and API keys are never accepted. A mail app password for a shared mailbox signs in with the shared mailbox's address. Revoking the mail app password, disabling the account or mailbox, or removing someone's access to a shared mailbox closes their open IMAP connections within a minute.
+
+**Folders.** INBOX, Drafts, Sent, Archive, Spam and Trash (advertised with their special-use roles) and your own folders. The namespace is flat: a folder name containing `/` or `.` is one folder, not a hierarchy.
+
+**Limits.** Per server instance: 500 connections in total, 20 per client address (IPv6 per /64), and 20 signed-in connections per account. After 10 failed sign-ins from one address in 15 minutes, further attempts from it fail for the rest of the window; after 20 failures for one username, its attempts are slowed rather than blocked, so nobody can lock another person out. Three failures end a connection. Idle connections close after 60 seconds before sign-in and 30 minutes after. These limits are held in memory by each instance and reset on restart; several instances behind a load balancer each enforce them separately.
+
 ## Cloudflare zone management (optional)
 
 If `CF_TOKEN` can also edit DNS and Email Routing on your zones, adding a domain configures Email Routing and the sending subdomain automatically, as on Workers. Without it, domains are recorded as manually managed and the DNS page shows what to set by hand.
@@ -50,6 +79,9 @@ If `CF_TOKEN` can also edit DNS and Email Routing on your zones, adding a domain
 | `SMTP_TLS_KEY`, `SMTP_TLS_CERT` | unset | STARTTLS certificate for the listener |
 | `SMTP_URL` | unset | Outbound relay |
 | `SMTP_TLS_REJECT_UNAUTHORIZED` | `true` | Trust self-signed relay certificates when `false` |
+| `IMAP_PORT` | `0` (off) | Read-only IMAP over implicit TLS; `993` to enable |
+| `IMAP_HOST` | `0.0.0.0` | Address the IMAP listener binds |
+| `IMAP_TLS_CERT`, `IMAP_TLS_KEY` | unset | PEM certificate chain and key for IMAP; required when `IMAP_PORT` is set |
 | `CF_ACCOUNT_ID`, `CF_TOKEN` | unset | Cloudflare Email Sending, and zone management if the token allows |
 | `INBOUND_WEBHOOK_SECRET` | unset | Enables `/api/inbound` for the relay Worker |
 | `TURNSTILE_SECRET_KEY` | unset | Bot protection on login and reset forms (`NEXT_PUBLIC_TURNSTILE_SITE_KEY` at build time) |
@@ -82,9 +114,10 @@ npm run build:node
 MAILFLARE_RUNTIME=node NODE_ENV=production DATA_DIR=./data node dist/server.mjs
 ```
 
-`MAILFLARE_RUNTIME` keeps its upstream name for compatibility. Port 25 needs root or a capability (`setcap cap_net_bind_service=+ep`); use `SMTP_INBOUND_PORT=2525` behind a port forward otherwise.
+`MAILFLARE_RUNTIME` keeps its upstream name for compatibility. Ports 25 and 993 need root or a capability; rather than running Node as root, use `SMTP_INBOUND_PORT=2525` and `IMAP_PORT=9993` behind a port forward (or give the service `CAP_NET_BIND_SERVICE`, for example with systemd's `AmbientCapabilities`).
 
 ## Limitations
 
-- There is no IMAP server or SMTP submission service, so desktop and phone mail clients cannot connect directly. Use the web app, a JMAP client or the API.
+- IMAP is read-only and there is no SMTP submission service: mail clients can read and search mail but not change it or send. Use the web app, a JMAP client or the API for those. IMAP is only available in this Node/Docker build, not on Cloudflare Workers.
+- IMAP rate and connection limits are per instance and in memory.
 - All state lives on one local volume with SQLite; plan volume backups and host capacity accordingly.

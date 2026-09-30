@@ -1,0 +1,310 @@
+import { readFileSync } from "node:fs";
+import { X509Certificate } from "node:crypto";
+import type { AddressInfo, Socket } from "node:net";
+import { createSecureContext, createServer, type TLSSocket } from "node:tls";
+import { DISTRIBUTION } from "@/lib/distribution/identity";
+import { ImapSession } from "@/lib/imap-server/session";
+import type { ImapLogEvent, ImapSessionHost } from "@/lib/imap-server/types";
+import { clientAddressKey, ConcurrencyCounter, Semaphore, SlidingWindowCounter } from "./imap-limits";
+
+/**
+ * The read-only IMAP listener (A4): implicit TLS only (port 993 by convention), no
+ * STARTTLS and no plaintext port. Node/Docker only; Workers cannot accept TCP. The
+ * protocol itself lives in src/lib/imap-server/; this file owns sockets, TLS, timers,
+ * per-instance abuse limits and shutdown.
+ *
+ * Enabled by IMAP_PORT (> 0) together with IMAP_TLS_CERT and IMAP_TLS_KEY (PEM file
+ * paths). Broken TLS material fails startup; SIGHUP reloads it without dropping sessions.
+ */
+
+export type ImapListenerConfig = { port: number; host: string; certPath: string; keyPath: string };
+export type TlsMaterial = { key: Buffer; cert: Buffer };
+
+export type ImapLimits = {
+	maxConnections: number;
+	maxConnectionsPerAddress: number;
+	maxSessionsPerUser: number;
+	authFailuresPerAddress: number;
+	authFailuresPerUsername: number;
+	authFailureWindowMs: number;
+	/** Added before each attempt for a username past its failure limit (a delay, never a lockout). */
+	usernameThrottleDelayMs: number;
+	handshakeTimeoutMs: number;
+	unauthenticatedIdleMs: number;
+	authenticatedIdleMs: number;
+	accessCheckIntervalMs: number;
+	maxConcurrentReads: number;
+	shutdownGraceMs: number;
+};
+
+export const DEFAULT_IMAP_LIMITS: ImapLimits = {
+	maxConnections: 500,
+	maxConnectionsPerAddress: 20,
+	maxSessionsPerUser: 20,
+	authFailuresPerAddress: 10,
+	authFailuresPerUsername: 20,
+	authFailureWindowMs: 15 * 60_000,
+	usernameThrottleDelayMs: 5_000,
+	handshakeTimeoutMs: 10_000,
+	unauthenticatedIdleMs: 60_000,
+	// RFC 3501 §5.4: an autologout timer must be at least 30 minutes.
+	authenticatedIdleMs: 30 * 60_000,
+	accessCheckIntervalMs: 60_000,
+	maxConcurrentReads: 8,
+	shutdownGraceMs: 2_000,
+};
+
+const TLS_MIN_VERSION = "TLSv1.2";
+
+/** The listener's configuration from the environment; null when IMAP is disabled. Throws on an invalid configuration. */
+export function readImapConfig(env: Record<string, string | undefined> = process.env): ImapListenerConfig | null {
+	const rawPort = env.IMAP_PORT?.trim() ?? "";
+	if (rawPort === "" || rawPort === "0") return null;
+	const port = Number(rawPort);
+	if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`IMAP_PORT must be a TCP port number (got "${rawPort}")`);
+	const certPath = env.IMAP_TLS_CERT?.trim();
+	const keyPath = env.IMAP_TLS_KEY?.trim();
+	if (!certPath || !keyPath) throw new Error("IMAP_PORT is set but IMAP_TLS_CERT and IMAP_TLS_KEY are not: the IMAP listener only serves implicit TLS");
+	return { port, host: env.IMAP_HOST?.trim() || "0.0.0.0", certPath, keyPath };
+}
+
+/** Read and validate the PEM certificate chain and key. Throws a message naming what is wrong. */
+export function loadTlsMaterial(config: Pick<ImapListenerConfig, "certPath" | "keyPath">): TlsMaterial {
+	let cert: Buffer;
+	let key: Buffer;
+	try {
+		cert = readFileSync(config.certPath);
+	} catch (error) {
+		throw new Error(`IMAP_TLS_CERT (${config.certPath}) cannot be read: ${(error as Error).message}`);
+	}
+	try {
+		key = readFileSync(config.keyPath);
+	} catch (error) {
+		throw new Error(`IMAP_TLS_KEY (${config.keyPath}) cannot be read: ${(error as Error).message}`);
+	}
+	try {
+		new X509Certificate(cert);
+	} catch (error) {
+		throw new Error(`IMAP_TLS_CERT (${config.certPath}) is not a PEM certificate: ${(error as Error).message}`);
+	}
+	try {
+		createSecureContext({ key, cert, minVersion: TLS_MIN_VERSION });
+	} catch (error) {
+		throw new Error(`IMAP TLS key and certificate are unusable together: ${(error as Error).message}`);
+	}
+	return { key, cert };
+}
+
+export type ImapListener = {
+	readonly port: number;
+	readonly connections: number;
+	/** Re-read the certificate files; keeps the current ones if the new ones are invalid. */
+	reloadCertificates(): boolean;
+	close(): Promise<void>;
+};
+
+type Logger = (event: ImapLogEvent) => void;
+
+function defaultLogger(event: ImapLogEvent): void {
+	const fields = Object.entries(event)
+		.filter(([name, value]) => name !== "event" && value !== undefined && value !== null)
+		.map(([name, value]) => `${name}=${typeof value === "string" && /\s/.test(value) ? JSON.stringify(value) : value}`)
+		.join(" ");
+	console.log(`imap ${event.event}${fields ? ` ${fields}` : ""}`);
+}
+
+export async function startImapListener(
+	env: CloudflareEnv,
+	config: ImapListenerConfig,
+	tls: TlsMaterial,
+	options: { limits?: Partial<ImapLimits>; log?: Logger } = {},
+): Promise<ImapListener> {
+	const limits = { ...DEFAULT_IMAP_LIMITS, ...options.limits };
+	const log = options.log ?? defaultLogger;
+	const perAddress = new ConcurrencyCounter(limits.maxConnectionsPerAddress);
+	const perUser = new ConcurrencyCounter(limits.maxSessionsPerUser);
+	const addressFailures = new SlidingWindowCounter(limits.authFailuresPerAddress, limits.authFailureWindowMs);
+	const usernameFailures = new SlidingWindowCounter(limits.authFailuresPerUsername, limits.authFailureWindowMs);
+	const reads = new Semaphore(limits.maxConcurrentReads);
+	const sessions = new Map<TLSSocket, ImapSession>();
+	const sockets = new Set<Socket>();
+	const handshakes = new Map<string, ReturnType<typeof setTimeout>>();
+	let open = 0;
+	let nextId = 1;
+	let closing = false;
+	let onDrained: (() => void) | null = null;
+
+	const server = createServer({ key: tls.key, cert: tls.cert, minVersion: TLS_MIN_VERSION, handshakeTimeout: limits.handshakeTimeoutMs });
+
+	server.on("connection", (socket: Socket) => {
+		const address = clientAddressKey(socket.remoteAddress);
+		if (closing || open >= limits.maxConnections || !perAddress.tryAcquire(address)) {
+			log({ event: "connection.refused", ip: socket.remoteAddress, reason: closing ? "shutdown" : open >= limits.maxConnections ? "global_limit" : "address_limit" });
+			socket.destroy();
+			return;
+		}
+		open += 1;
+		sockets.add(socket);
+		// Node's handshakeTimeout only runs once a ClientHello arrives; a peer that never
+		// starts TLS is cut here instead.
+		const pending = `${socket.remoteAddress}\u0000${socket.remotePort}`;
+		const handshake = setTimeout(() => {
+			log({ event: "tls.handshake-timeout", ip: socket.remoteAddress });
+			socket.destroy();
+		}, limits.handshakeTimeoutMs);
+		handshakes.set(pending, handshake);
+		socket.once("close", () => {
+			clearTimeout(handshake);
+			handshakes.delete(pending);
+			open -= 1;
+			sockets.delete(socket);
+			if (!sockets.size) onDrained?.();
+			perAddress.release(address);
+		});
+	});
+
+	server.on("tlsClientError", (error, socket) => {
+		log({ event: "tls.error", ip: socket.remoteAddress, error: error.message });
+	});
+
+	server.on("secureConnection", (socket: TLSSocket) => {
+		const pending = `${socket.remoteAddress}\u0000${socket.remotePort}`;
+		clearTimeout(handshakes.get(pending));
+		handshakes.delete(pending);
+		const id = `c${nextId++}`;
+		const ip = socket.remoteAddress;
+		const addressKey = clientAddressKey(ip);
+		const timers = new Set<ReturnType<typeof setTimeout>>();
+		const delays = new Set<() => void>();
+		let claimedUser: string | null = null;
+
+		const host: ImapSessionHost = {
+			write(bytes) {
+				if (socket.destroyed || !socket.writable) return Promise.resolve();
+				return new Promise((resolve) => {
+					const flushed = socket.write(bytes);
+					if (flushed) return resolve();
+					const done = () => {
+						socket.off("drain", done);
+						socket.off("close", done);
+						resolve();
+					};
+					socket.on("drain", done);
+					socket.on("close", done);
+				});
+			},
+			close() {
+				socket.end();
+				const timer = setTimeout(() => socket.destroy(), limits.shutdownGraceMs);
+				timer.unref();
+			},
+			pause: () => socket.pause(),
+			resume: () => socket.resume(),
+			delay(ms) {
+				return new Promise((resolve) => {
+					const finish = () => {
+						clearTimeout(timer);
+						timers.delete(timer);
+						delays.delete(finish);
+						resolve();
+					};
+					const timer = setTimeout(finish, ms);
+					timers.add(timer);
+					delays.add(finish);
+				});
+			},
+			log: (event) => log({ ...event, connection: id, ip }),
+			beforeAuthenticate(username) {
+				if (addressFailures.exceeded(addressKey)) return { allowed: false, delayMs: 0 };
+				const throttled = usernameFailures.exceeded(username.trim().toLowerCase());
+				return { allowed: true, delayMs: throttled ? limits.usernameThrottleDelayMs : 0 };
+			},
+			afterAuthenticate(username, ok) {
+				if (ok) return;
+				addressFailures.hit(addressKey);
+				usernameFailures.hit(username.trim().toLowerCase());
+			},
+			claimUserSlot(userId) {
+				if (claimedUser) return true;
+				if (!perUser.tryAcquire(userId)) return false;
+				claimedUser = userId;
+				return true;
+			},
+			acquireRead: () => reads.acquire(),
+			onAuthenticated: () => socket.setTimeout(limits.authenticatedIdleMs),
+		};
+
+		const session = new ImapSession(env, host, { serverName: DISTRIBUTION.name });
+		sessions.set(socket, session);
+		socket.setNoDelay(true);
+		socket.setTimeout(limits.unauthenticatedIdleMs);
+		socket.on("timeout", () => {
+			log({ event: "idle.timeout", connection: id, ip, authenticated: session.isAuthenticated });
+			void session.end("Autologout; idle for too long");
+		});
+		socket.on("data", (chunk: Buffer) => {
+			session.receive(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+		});
+		socket.on("error", (error) => log({ event: "socket.error", connection: id, ip, error: error.message }));
+		socket.on("close", () => {
+			session.transportClosed();
+			sessions.delete(socket);
+			for (const finish of [...delays]) finish();
+			for (const timer of timers) clearTimeout(timer);
+			if (claimedUser) perUser.release(claimedUser);
+			log({ event: "connection.closed", connection: id, ip });
+		});
+		log({ event: "connection.open", connection: id, ip, protocol: socket.getProtocol() ?? undefined });
+		void session.start();
+	});
+
+	// Idle connections whose access was revoked are closed at the next check (A3 checks every command anyway).
+	const accessCheck = setInterval(() => {
+		for (const session of sessions.values()) if (session.isAuthenticated) void session.checkAccess();
+	}, limits.accessCheckIntervalMs);
+	accessCheck.unref();
+
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(config.port, config.host, () => {
+			server.off("error", reject);
+			resolve();
+		});
+	});
+	server.on("error", (error) => log({ event: "listener.error", error: error.message }));
+	const port = (server.address() as AddressInfo).port;
+	log({ event: "listening", host: config.host, port, tls: TLS_MIN_VERSION });
+
+	return {
+		port,
+		get connections() {
+			return open;
+		},
+		reloadCertificates() {
+			try {
+				const material = loadTlsMaterial(config);
+				server.setSecureContext({ key: material.key, cert: material.cert, minVersion: TLS_MIN_VERSION });
+				log({ event: "tls.reloaded" });
+				return true;
+			} catch (error) {
+				log({ event: "tls.reload-failed", error: (error as Error).message });
+				return false;
+			}
+		},
+		async close() {
+			if (closing) return;
+			closing = true;
+			clearInterval(accessCheck);
+			const stopped = new Promise<void>((resolve) => server.close(() => resolve()));
+			await Promise.all([...sessions.values()].map((session) => session.end("Server shutting down")));
+			// Sessions got BYE; anything still open after the grace period (including handshakes in progress) is cut.
+			const deadline = setTimeout(() => {
+				for (const socket of sockets) socket.destroy();
+			}, limits.shutdownGraceMs);
+			await stopped;
+			// server.close() can report before every socket's own close handler ran; wait for those too.
+			if (sockets.size) await new Promise<void>((resolve) => (onDrained = resolve));
+			clearTimeout(deadline);
+		},
+	};
+}

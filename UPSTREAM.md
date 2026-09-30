@@ -161,7 +161,7 @@ Before a `bp` migration reaches `main`: `node --test tests/*.test.mjs` (fresh da
 
 ## IMAP mailbox state
 
-`src/lib/imap/` holds the storage contract a future IMAP listener consumes; it has no listener, parser or protocol dependency. It reads the upstream mail model and never changes it.
+`src/lib/imap/` holds the storage contract the IMAP listener consumes (see "IMAP listener" below); it has no parser or protocol dependency of its own. It reads the upstream mail model and never changes it.
 
 - **Folders.** INBOX (`status = 'received'`, no folder), Drafts (`draft`), Sent (`sent`), Archive (`archived`), Spam (`spam`, special-use Junk), Trash (`trash`) and one folder per row of `folders` (`received` mail filed there). This is the web app's partition: a custom folder only holds `received` mail, so a message moved to Trash from a folder is in Trash. Queued and failed sends are not IMAP-visible (their representation is generated per read), and snoozing does not hide mail, as in JMAP.
 - **Identity.** `imap_folders` keeps UIDVALIDITY and UIDNEXT per (mailbox, folder key); `imap_message_uids` keeps the UID a message holds in the folder it is in. A message that leaves a folder (any status or folder change, or deletion, by any code path) loses that UID the next time the folder is read and receives the next UID of its new folder; UIDs are never reused, because UIDNEXT only increases (enforced by triggers) and moves inside the same statement that assigns UIDs. A folder's existing mail gets UIDs on its first read, oldest first (`created_at`, then `id`), in bounded chunks. Draft UIDs are bound to A1's draft fingerprint and to the stored object first served, so an edited draft gets a new UID instead of new bytes under an old one.
@@ -174,7 +174,20 @@ When an upstream integration touches the mail model, certify before merging:
 2. The meaning of `messages.status` values and of `folder_id` still matches `folderKeyForMessage` and `membershipCondition` in `src/lib/imap/`; a new status must be mapped or deliberately left invisible.
 3. `folders.id` stays stable across renames (IMAP keeps UIDVALIDITY through a rename).
 4. A rebuild of `mailboxes` is caught by the anchored-table guard (it would cascade into `imap_folders` on D1).
-5. `node --test tests/*.test.mjs` (including `tests/imap-state.test.mjs`, SQLite) and `node scripts/imap-state-d1-check.mjs` (the same layer in workerd over D1 and R2) pass on the integrated tree.
+5. `node --test tests/*.test.mjs` (including `tests/imap-state.test.mjs`, SQLite, and the A4 listener suites `tests/imap-protocol.test.mjs`, `tests/imap-session.test.mjs` and `tests/imap-listener.test.mjs`) and `node scripts/imap-state-d1-check.mjs` (the state layer in workerd over D1 and R2) pass on the integrated tree.
+
+## IMAP listener
+
+Blue Pine-owned and Node/Docker only: upstream has no IMAP server, and Workers cannot accept TCP. It is read-only IMAP4rev1 over implicit TLS, on top of the A3 contract above; it defines no storage semantics of its own and needs no schema.
+
+- **`src/lib/imap-server/`** is the protocol engine: framing, grammar, session state, mailbox names, FETCH, MIME structure, ENVELOPE and SEARCH. It is runtime-neutral (`Uint8Array`, no Node APIs), reaches storage only through `src/lib/imap/service.ts` and A2's `verifyMailAppPassword`, and could sit behind a future gateway. **`server/runtime/imap.ts`** and **`imap-limits.ts`** own the TLS socket, timers, per-instance limits, certificate reload and shutdown; `server/index.ts` starts it when `IMAP_PORT` is set. The distribution guard fails if anything the Worker compiles imports either, or if a Workers build contains the listener.
+- **Capabilities** are exactly `IMAP4rev1 SASL-IR AUTH=PLAIN ID` before login and `IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE` after (`session.ts`). Nothing else is advertised (no IMAP4rev2, IDLE, MOVE, UIDPLUS, CONDSTORE/QRESYNC, LITERAL+, UTF8=ACCEPT); adding one needs its behavior implemented and tested first.
+- **Read-only:** SELECT and EXAMINE both answer `[READ-ONLY]` with `PERMANENTFLAGS ()`; BODY[] and RFC822 never set \Seen; STORE, COPY, EXPUNGE, APPEND, CREATE, DELETE, RENAME, SUBSCRIBE and UNSUBSCRIBE are refused before any storage call. The listener never calls `setImapMessageFlags`. A3's own UID and canonical-size bookkeeping still happens on reads, as A3 intends.
+- **Names:** a flat namespace with a `NIL` hierarchy delimiter, so every folder name (which may contain `/` or `.`) is exposed exactly as A3 names it, in modified UTF-7. Only INBOX is case-insensitive.
+- **Sequence numbers** exist only in the session: a snapshot of A3's UIDs taken at SELECT and diffed against A3 before each command, with EXPUNGE withheld during FETCH and SEARCH (RFC 3501 §7.4.1). A UIDVALIDITY change or a vanished selected folder ends the session with BYE.
+- **Content:** FETCH serves A3's canonical octets exactly. BODYSTRUCTURE, BODY, sections and ENVELOPE are derived from those same octets by an offset-based reading (`mime.ts`), never from database columns or rebuilt MIME. SEARCH answers header and body keys from those octets too. Derived metadata is cached per (mailbox, folder key, UIDVALIDITY, UID), which A3 guarantees is immutable.
+- **Authentication** is A2 with the `imap` scope, then `authorizeImapAccess`; A3 re-authorizes each command and the listener re-checks idle sessions every 60 seconds, closing revoked ones with BYE.
+
 
 ## Downstream changes to offer upstream
 

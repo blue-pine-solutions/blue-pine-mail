@@ -12,16 +12,21 @@ import { processOutboundQueue, type OutboundQueueMessage } from "@/lib/email/sen
 import { processWebhookRetry, type WebhookRetryMessage } from "@/lib/email/webhooks";
 import { isInboundQueueMessage, isWebhookRetryMessage } from "../worker-utils";
 import { createNodeRuntime } from "./runtime/env";
+import { loadTlsMaterial, readImapConfig, startImapListener } from "./runtime/imap";
 import { applyMigrations } from "./runtime/migrate";
 import { startScheduler } from "./runtime/scheduler";
 import { startSmtpListener } from "./runtime/smtp";
 
 /**
  * The self-hosted entrypoint: one Node process serving the Next app, the
- * realtime WebSocket, the SMTP listener, the job queues and the backup
- * schedule, the same jobs worker.ts spreads across Cloudflare products.
+ * realtime WebSocket, the SMTP listener, the read-only IMAP listener, the job
+ * queues and the backup schedule, the same jobs worker.ts spreads across
+ * Cloudflare products (IMAP has no Workers counterpart).
  */
 async function main() {
+	// IMAP is opt-in (IMAP_PORT); when enabled, unusable TLS material stops startup here.
+	const imapConfig = readImapConfig();
+	const imapTls = imapConfig ? loadTlsMaterial(imapConfig) : null;
 	const port = Number(process.env.PORT ?? 3000);
 	const host = process.env.HOST ?? "0.0.0.0";
 	const dev = process.env.NODE_ENV !== "production";
@@ -86,9 +91,12 @@ async function main() {
 			tls: process.env.SMTP_TLS_KEY && process.env.SMTP_TLS_CERT ? { keyPath: process.env.SMTP_TLS_KEY, certPath: process.env.SMTP_TLS_CERT } : null,
 		});
 	}
+	const imap = imapConfig && imapTls ? await startImapListener(env, imapConfig, imapTls) : null;
+	if (imap) process.on("SIGHUP", () => imap.reloadCertificates());
 	const stopScheduler = startScheduler(env);
 
 	const shutdown = () => {
+		void imap?.close();
 		stopScheduler();
 		runtime.inboundQueue.stop();
 		runtime.outboundQueue.stop();

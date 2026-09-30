@@ -190,3 +190,38 @@ test("relative links in the documentation point at files that exist", () => {
 	}
 	assert.ok(existsSync(join(root, ".env.docker.example")), "the self-hosting guide copies .env.docker.example");
 });
+
+/** Every .ts/.tsx file under a directory. */
+function sourceFiles(directory) {
+	return readdirSync(join(root, directory), { recursive: true })
+		.map(String)
+		.filter((file) => /\.(ts|tsx|mts)$/.test(file))
+		.map((file) => join(directory, file));
+}
+
+test("the IMAP listener is Node-only: nothing the Worker compiles imports it or the protocol engine", () => {
+	const workerSources = ["worker.ts", "worker-utils.ts", ...sourceFiles("src").filter((file) => !file.startsWith(join("src", "lib", "imap-server")))];
+	for (const file of workerSources) {
+		const source = read(file);
+		assert.doesNotMatch(source, /from\s+["'][^"']*server\/runtime\//, `${file} imports the Node runtime`);
+		assert.doesNotMatch(source, /from\s+["'](?:@\/lib\/imap-server|[^"']*\/imap-server\/)/, `${file} imports the IMAP protocol engine`);
+	}
+	// The protocol engine itself stays runtime-neutral, and only the Node entrypoint starts the listener.
+	for (const file of sourceFiles(join("src", "lib", "imap-server"))) {
+		assert.doesNotMatch(read(file), /from\s+["']node:|\bBuffer\b|\bprocess\./, `${file} must not use Node APIs`);
+	}
+	const starters = sourceFiles("server").filter((file) => /startImapListener\(/.test(read(file)) && !file.endsWith(join("runtime", "imap.ts")));
+	assert.deepEqual(starters, [join("server", "index.ts")]);
+});
+
+const workersBuild = join(root, "dist", "server");
+test("the Workers build output contains no IMAP listener", { skip: !existsSync(workersBuild) && "no Workers build in dist/server (run npm run build)" }, () => {
+	const files = readdirSync(workersBuild, { recursive: true }).map(String).filter((file) => /\.(m?js)$/.test(file));
+	assert.ok(files.length > 0, "the Workers build has JavaScript output");
+	for (const file of files) {
+		const code = readFileSync(join(workersBuild, file), "utf8");
+		for (const marker of ["startImapListener", "IMAP4rev1 SASL-IR AUTH=PLAIN ID", "IMAP_TLS_CERT", "Non-synchronizing literals are not supported"]) {
+			assert.ok(!code.includes(marker), `${file} contains "${marker}"`);
+		}
+	}
+});
