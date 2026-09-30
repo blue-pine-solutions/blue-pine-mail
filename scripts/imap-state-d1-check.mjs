@@ -4,8 +4,8 @@
  * bindings, and exercises migrations, concurrent first access and delivery, deletion,
  * canonical bytes, batched flag writes (A5.1), bp0003's \Deleted invariant, \Deleted and
  * recoverable EXPUNGE (A5.2a), MOVE and its spam training (A5.2b), bp0004 and permanent
- * EXPUNGE in Trash and Drafts over D1 and R2 (A5.2c), the database guards, backup/restore and
- * a restart.
+ * EXPUNGE in Trash and Drafts over D1 and R2 (A5.2c), UID EXPUNGE and MOVE's destination UIDs
+ * for COPYUID (A5.3), the database guards, backup/restore and a restart.
  *
  *   node scripts/imap-state-d1-check.mjs
  *
@@ -350,9 +350,14 @@ try {
 	const mv2 = await op("ensureImapUid", owner, "inbox", "mv-2");
 	const mv1Before = await op("fetch", owner, "inbox", mv1);
 	await op("store", owner, "inbox", [mv2], { mode: "add", flags: ["deleted"] });
-	const archiveNext = (await op("openImapFolder", owner, "archive")).uidNext;
+	const archiveState = await op("openImapFolder", owner, "archive");
+	const archiveNext = archiveState.uidNext;
 	const moveResult = await op("moveImapMessages", owner, "inbox", [mv1, mv2], "archive");
-	check("MOVE relocates both, reports them in UID order, no training for Archive", same(moveResult, { moved: [{ uid: mv1, messageId: "mv-1" }, { uid: mv2, messageId: "mv-2" }], training: null }), moveResult);
+	check(
+		"MOVE relocates both, reports them in UID order with the destination UIDs and UIDVALIDITY read back on D1 (COPYUID, A5.3), no training for Archive",
+		same(moveResult, { moved: [{ uid: mv1, messageId: "mv-1", destinationUid: archiveNext, destinationUidValidity: archiveState.uidValidity }, { uid: mv2, messageId: "mv-2", destinationUid: archiveNext + 1, destinationUidValidity: archiveState.uidValidity }], training: null }),
+		moveResult,
+	);
 	const mvRows = (await sql(["SELECT id, status, folder_id, read, starred, created_at, raw_r2_key FROM messages WHERE id IN ('mv-1', 'mv-2') ORDER BY id"]))[0];
 	check("status archived; read, starred, date and object unchanged", mvRows.every((row) => row.status === "archived" && row.folder_id === null) && mvRows[0].read === 1 && mvRows[0].starred === 1 && mvRows[0].created_at === 9900 && mvRows[0].raw_r2_key === "inbound/mv.eml", mvRows);
 	const archiveAfter = await op("openImapFolder", owner, "archive");
@@ -377,6 +382,11 @@ try {
 	const custom = await op("openImapFolder", owner, "f:fld-m");
 	check("MOVE of 90 UIDs (relocation batches of 80 and 10) into a custom folder on D1", uUids.length === 90 && same(uMoved.moved.map((entry) => entry.uid), uUids) && same(custom.messages.map((entry) => entry.uid), Array.from({ length: 90 }, (_, index) => customNext + index)) && custom.uidNext === customNext + 90, uMoved.error ?? [uMoved.moved?.length, custom.messages.length]);
 	check("custom folder rows: received with folder_id", (await sql(["SELECT COUNT(*) AS n FROM messages WHERE id LIKE 'u-%' AND status = 'received' AND folder_id = 'fld-m'"]))[0][0].n === 90);
+	check(
+		"every chunk reports each message's actual destination UID and the folder's UIDVALIDITY (A5.3)",
+		same(uMoved.moved.map((entry) => [entry.messageId, entry.destinationUid, entry.destinationUidValidity]), uMoved.moved.map((entry) => [entry.messageId, custom.messages.find((row) => row.messageId === entry.messageId)?.uid, custom.uidValidity])),
+		uMoved.moved?.slice(0, 3),
+	);
 
 	// Concurrent MOVEs of the same UIDs to different folders: each message moves exactly once.
 	const racers = custom.messages.slice(0, 12).map((entry) => entry.uid);
@@ -416,7 +426,8 @@ try {
 	const outShared = await op("ensureImapUid", shared, "inbox", "sp-out-s");
 	check("outbound mail cannot MOVE to Spam", (await op("moveImapMessages", shared, "inbox", [outShared], "junk")).code === "unsupported");
 	const spamMove = await op("moveImapMessages", shared, "inbox", [spShared], "junk");
-	check("MOVE into Spam reports spam training", same(spamMove, { moved: [{ uid: spShared, messageId: "sp-2" }], training: "spam" }), spamMove);
+	const sharedJunk = await op("openImapFolder", shared, "junk");
+	check("MOVE into Spam reports spam training", same(spamMove, { moved: [{ uid: spShared, messageId: "sp-2", destinationUid: sharedJunk.messages.find((entry) => entry.messageId === "sp-2")?.uid, destinationUidValidity: sharedJunk.uidValidity }], training: "spam" }), spamMove);
 	check("training after the committed MOVE succeeds on D1", same(await op("trainImapSpamFeedback", shared, ["sp-2"], "spam"), []));
 	const spTotals = async (mailboxId) => (await sql(["SELECT COALESCE(SUM(spam_count), 0) AS spam, COALESCE(SUM(ham_count), 0) AS ham FROM spam_token_stats WHERE mailbox_id = ?", mailboxId]))[0][0];
 	const trained = await spTotals("mbx-s");
@@ -490,6 +501,26 @@ try {
 	check("attachment rows cascade; the stale Archive mapping is removed explicitly", (await sql(["SELECT COUNT(*) AS n FROM message_attachments WHERE message_id = 'pt-1'"]))[0][0].n === 0 && (await sql(["SELECT COUNT(*) AS n FROM imap_message_uids WHERE message_id = 'pt-1'"]))[0][0].n === 0);
 	check("FTS no longer finds it; the JMAP revision moved", (await sql(["SELECT COUNT(*) AS n FROM messages_fts WHERE messages_fts MATCH 'pt'"]))[0][0].n === (await sql(["SELECT COUNT(*) AS n FROM messages WHERE subject LIKE 'subject pt%'"]))[0][0].n && (await revisionOf()) > pRevision);
 	check("a repeated EXPUNGE deletes nothing", same(await op("expungeImapFolder", purger, "trash", pTrash.uidNext - 1), []));
+
+	// UID EXPUNGE (A5.3): the same paths narrowed to the requested UIDs, on D1.
+	await putMessage("pu-1", "trash");
+	await putMessage("pu-2", "trash");
+	await putMessage("pu-3", "trash");
+	const uTrash = await op("openImapFolder", purger, "trash");
+	const [pu1, pu2, pu3] = ["pu-1", "pu-2", "pu-3"].map((id) => uTrash.messages.find((entry) => entry.messageId === id).uid);
+	await op("store", purger, "trash", [pu1, pu2], { mode: "add", flags: ["deleted"] });
+	const uPurged = await op("expungeImapFolder", purger, "trash", uTrash.uidNext - 1, [pu2, pu3]);
+	check("UID EXPUNGE in Trash deletes only requested \\Deleted UIDs", same(uPurged, [pu2]) && (await rowExists("pu-1")) && !(await rowExists("pu-2")) && (await rowExists("pu-3")) && !(await inR2("inbound/pu-2.eml")) && (await inR2("inbound/pu-1.eml")), uPurged);
+	check("the unrequested \\Deleted mark stays", (await sql(["SELECT deleted FROM imap_message_uids WHERE message_id = 'pu-1'"]))[0][0]?.deleted === 1);
+	await putMessage("uxr-1", "received");
+	await putMessage("uxr-2", "received");
+	const uInboxP = await op("openImapFolder", purger, "inbox");
+	const [pr1, pr2] = ["uxr-1", "uxr-2"].map((id) => uInboxP.messages.find((entry) => entry.messageId === id).uid);
+	await op("store", purger, "inbox", [pr1, pr2], { mode: "add", flags: ["deleted"] });
+	const uRelocated = await op("expungeImapFolder", purger, "inbox", uInboxP.uidNext - 1, [pr2]);
+	check("UID EXPUNGE in INBOX moves only the requested \\Deleted UID to Trash", same(uRelocated, [pr2]) && (await sql(["SELECT id, status FROM messages WHERE id IN ('uxr-1', 'uxr-2') ORDER BY id"]))[0].map((row) => row.status).join() === "received,trash", uRelocated);
+	await op("store", purger, "trash", [pu1], { mode: "remove", flags: ["deleted"] });
+	await op("store", purger, "inbox", [pr1], { mode: "remove", flags: ["deleted"] });
 
 	// One Draft: the author's own; another user's draft is refused.
 	await putMessage("pd-own", "draft");

@@ -40,16 +40,19 @@ import type { FetchItem, FramedItem, FramerLimits, ImapSessionHost, SelectedMail
  * - EXPUNGE and CLOSE through A3's expungeImapFolder: recoverable (A5.2a, \Deleted messages
  *   move to Trash) everywhere but Trash and Drafts, where they delete permanently (A5.2c,
  *   database rows first, stored objects after the commit, best effort);
+ * - UID EXPUNGE (A5.3, RFC 4315): the same expunge, narrowed to the UIDs the client names;
  * - MOVE and UID MOVE (A5.2b, RFC 6851): A3's moveImapMessages, under its special-folder
- *   policy, then the spam training a move into or out of Spam stands for.
- * Every other command that would write (COPY, APPEND, UID EXPUNGE, folder management) is
- * refused before any storage call; UIDPLUS is not offered, so MOVE sends no COPYUID.
+ *   policy, then the spam training a move into or out of Spam stands for; with UIDPLUS (A5.3)
+ *   a committed move reports COPYUID from the destination UIDs the database allocated.
+ * Every other command that would write (COPY, APPEND, folder management) is refused before
+ * any storage call. UIDPLUS's APPENDUID and COPYUID for COPY are owed only by a successful
+ * APPEND or COPY, which do not exist yet.
  */
 
 /** Capabilities before authentication. Each is implemented and tested (tests/imap-listener.test.mjs). */
 export const PREAUTH_CAPABILITIES = "IMAP4rev1 SASL-IR AUTH=PLAIN ID";
-/** Capabilities once authenticated. */
-export const AUTH_CAPABILITIES = "IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE";
+/** Capabilities once authenticated. Like MOVE, UIDPLUS only extends commands of the authenticated states. */
+export const AUTH_CAPABILITIES = "IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS";
 
 export const MAX_QUEUED_COMMANDS = 16;
 export const MAX_LINE = 64 * 1024;
@@ -333,7 +336,9 @@ export class ImapSession {
 				return this.send(`${tag} OK UNSELECT completed`);
 			case "EXPUNGE":
 				reader.end();
-				return this.expunge(tag);
+				return this.expunge(tag, null);
+			case "UID EXPUNGE":
+				return this.uidExpunge(tag, reader);
 			case "FETCH":
 			case "UID FETCH":
 				return this.fetch(tag, reader, command === "UID FETCH");
@@ -351,7 +356,7 @@ export class ImapSession {
 	}
 
 	private isKnown(command: string): boolean {
-		return ["LIST", "LSUB", "STATUS", "SELECT", "EXAMINE", "NAMESPACE", "CHECK", "CLOSE", "UNSELECT", "FETCH", "UID FETCH", "SEARCH", "UID SEARCH", "LOGIN", "AUTHENTICATE", "STORE", "UID STORE", "COPY", "UID COPY", "MOVE", "UID MOVE", "EXPUNGE", ...UNSUPPORTED_COMMANDS].includes(command);
+		return ["LIST", "LSUB", "STATUS", "SELECT", "EXAMINE", "NAMESPACE", "CHECK", "CLOSE", "UNSELECT", "FETCH", "UID FETCH", "SEARCH", "UID SEARCH", "LOGIN", "AUTHENTICATE", "STORE", "UID STORE", "COPY", "UID COPY", "MOVE", "UID MOVE", "EXPUNGE", "UID EXPUNGE", ...UNSUPPORTED_COMMANDS].includes(command);
 	}
 
 	// ---- any state --------------------------------------------------------------
@@ -766,20 +771,44 @@ export class ImapSession {
 	 * bp0003, or in Drafts without bp0004) changes nothing; a chunk refused after earlier
 	 * chunks committed still reports what they removed. Object-storage cleanup after a
 	 * permanent deletion never affects the answer.
+	 *
+	 * With `only` (UID EXPUNGE) A3 acts on those UIDs alone; the answer reports, as EXPUNGE
+	 * always does, every message that has left the folder.
 	 */
-	private async expunge(tag: string): Promise<void> {
+	private async expunge(tag: string, only: { uids: number[] } | null): Promise<void> {
 		const selected = this.selected!;
 		if (selected.readOnly) return this.send(`${tag} NO Mailbox is read-only`);
 		await this.refresh(false);
 		try {
-			await this.selectedCall(() => expungeImapFolder(this.env, this.principal!, selected.key, selected.highestUid));
+			await this.selectedCall(() => expungeImapFolder(this.env, this.principal!, selected.key, selected.highestUid, only?.uids));
 		} catch (error) {
 			// Report whatever earlier chunks moved before answering; a lost session is simply ended.
 			if (!(error instanceof SessionEnd || (error instanceof ImapStateError && error.code === "forbidden"))) await this.refresh(true).catch(() => undefined);
 			throw error;
 		}
 		await this.refresh(true);
-		await this.send(`${tag} OK EXPUNGE completed`);
+		await this.send(`${tag} OK ${only ? "UID EXPUNGE" : "EXPUNGE"} completed`);
+	}
+
+	/**
+	 * UID EXPUNGE (RFC 4315 §2.1), A5.3: EXPUNGE restricted to the messages the UID set names.
+	 * The set is resolved against the UIDs this session has announced (a UID it has never
+	 * reported, including one above its highest, is never a candidate), after a refresh without
+	 * EXPUNGE, so it costs at most one pass over the mailbox whatever range the client sends.
+	 * Of those, A3 removes only the ones still marked \Deleted, by the same recoverable or
+	 * permanent path as EXPUNGE and with every one of its guards.
+	 */
+	private async uidExpunge(tag: string, reader: CommandReader): Promise<void> {
+		reader.sp();
+		const token = reader.token();
+		if (!isSequenceSetToken(token)) throw new ImapSyntaxError("Invalid UID set");
+		const set = parseSequenceSet(token);
+		reader.end();
+		const selected = this.selected!;
+		if (selected.readOnly) return this.send(`${tag} NO Mailbox is read-only`);
+		await this.refresh(false);
+		const uids = resolveUids(set, selected.uids).filter((uid) => !selected.vanished.has(uid));
+		return this.expunge(tag, { uids });
 	}
 
 	/**
@@ -815,7 +844,10 @@ export class ImapSession {
 	 * moves those messages under its authorization and special-folder policy, one atomic batch
 	 * per chunk, and the view is refreshed with EXPUNGE, which reports every message that left
 	 * (by this MOVE or otherwise) in the client's sequence space, highest number first, before
-	 * the tagged answer. No COPYUID: UIDPLUS is not offered.
+	 * the tagged answer. Before those EXPUNGEs, `* OK [COPYUID …]` (A5.3, RFC 4315 and RFC 6851
+	 * §4.3) maps each moved source UID to the destination UID the committing batch read back,
+	 * in ascending source order; it is sent only for messages that did move, and not at all
+	 * when nothing moved or any mapping is unknown (see copyUidData).
 	 *
 	 * A refusal moves nothing: NOPERM without management access (or for another user's
 	 * draft), CANNOT for a destination the policy refuses, NONEXISTENT for an unknown one. A
@@ -848,6 +880,9 @@ export class ImapSession {
 			throw error;
 		}
 		if (result.training && result.moved.length) await this.train(result.moved.map((entry) => entry.messageId), result.training);
+		// RFC 6851 §4.3: with UIDPLUS, COPYUID comes in an untagged OK before the EXPUNGEs.
+		const copyUid = copyUidData(result.moved);
+		if (copyUid) await this.send(`* OK [COPYUID ${copyUid}] Moved`);
 		await this.refresh(true);
 		if (result.moved.length < targets.length) {
 			const stillHere = live.some((target) => !result.moved.some((entry) => entry.uid === target.uid) && selected.entries.has(target.uid));
@@ -901,6 +936,33 @@ export class ImapSession {
 		if (unavailable) return this.send(`${tag} NO [UNAVAILABLE] Some messages could not be searched`);
 		await this.send(`${tag} OK ${uidMode ? "UID SEARCH" : "SEARCH"} completed`);
 	}
+}
+
+/**
+ * `uidvalidity SP source-uids SP destination-uids` for COPYUID (RFC 4315 §3), or null when
+ * there is nothing to report or it could not be reported exactly: no message moved, a
+ * destination UID the database did not return, or chunks that saw different destination
+ * UIDVALIDITY values. `moved` is in ascending source UID order and the two sets correspond
+ * position by position. Only ascending runs are written as ranges, so each set expands to
+ * exactly the order of the other.
+ */
+export function copyUidData(moved: ImapMoveResult["moved"]): string | null {
+	if (!moved.length) return null;
+	const validity = moved[0].destinationUidValidity;
+	if (validity === null || moved.some((entry) => entry.destinationUid === null || entry.destinationUidValidity !== validity)) return null;
+	return `${validity} ${uidRuns(moved.map((entry) => entry.uid))} ${uidRuns(moved.map((entry) => entry.destinationUid!))}`;
+}
+
+/** A UID list as a uid-set, keeping its order: consecutive ascending UIDs become `a:b`. */
+function uidRuns(uids: number[]): string {
+	const out: string[] = [];
+	for (let index = 0; index < uids.length; ) {
+		let end = index;
+		while (end + 1 < uids.length && uids[end + 1] === uids[end] + 1) end += 1;
+		out.push(end > index ? `${uids[index]}:${uids[end]}` : String(uids[index]));
+		index = end + 1;
+	}
+	return out.join(",");
 }
 
 /** FETCH items that set \Seen when fetched (RFC 3501 §6.4.5): BODY[…] without .PEEK, RFC822 and RFC822.TEXT, not RFC822.HEADER. */

@@ -243,7 +243,11 @@ export type ImapRelocationGuards = {
  *    key and size (the bytes do not change), and advance UIDNEXT in the same statement
  *    (bp0002). A destination UID left from an earlier stay whose loss nobody observed is
  *    kept; step 1 has already cleared its \Deleted mark.
- * 3. Release of every source UID whose message is no longer in the source folder.
+ * 3. The destination UID each message named by these source UIDs now holds, with the
+ *    destination folder's UIDVALIDITY, read inside the same transaction: the UID step 2
+ *    allocated, or the one kept from an earlier stay. This is what MOVE's COPYUID reports
+ *    (A5.3); it is never computed outside the database.
+ * 4. Release of every source UID whose message is no longer in the source folder.
  *
  * `messages` columns other than status and folder, and every stored object, are untouched.
  * A failed statement (for example an exhausted UIDNEXT) rolls the whole batch back.
@@ -256,7 +260,7 @@ export async function relocateImapMessages(
 	target: { status: string; folderId: string | null },
 	uids: number[],
 	guards: ImapRelocationGuards = {},
-): Promise<{ released: number[]; moved: Array<{ uid: number; messageId: string }> }> {
+): Promise<{ released: number[]; moved: ImapRelocatedMessage[] }> {
 	if (!uids.length) return { released: [], moved: [] };
 	if (uids.length > IN_LIST_CHUNK) throw new Error("Too many UIDs for one relocation");
 	const inSource = membershipCondition(mailboxId, source.key);
@@ -271,7 +275,7 @@ export async function relocateImapMessages(
 		EXISTS (SELECT 1 FROM messages WHERE messages.id = s.message_id AND ${inDestination})
 		AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = s.message_id AND ${inSource})
 	`;
-	const [updated, , released] = await batchSql(db, [
+	const [updated, , placed, released] = await batchSql(db, [
 		sql`
 			UPDATE messages SET status = ${target.status}, folder_id = ${target.folderId}
 			WHERE ${inSource}
@@ -292,6 +296,13 @@ export async function relocateImapMessages(
 				AND NOT EXISTS (SELECT 1 FROM imap_message_uids x WHERE x.imap_folder_id = ${destination.folder.id} AND x.message_id = s.message_id)
 		`,
 		sql`
+			SELECT d.uid AS uid, d.message_id AS message_id, f.uid_validity AS uid_validity
+			FROM imap_message_uids d
+			JOIN imap_folders f ON f.id = d.imap_folder_id
+			WHERE d.imap_folder_id = ${destination.folder.id}
+				AND d.message_id IN (SELECT message_id FROM imap_message_uids WHERE imap_folder_id = ${source.folder.id} AND uid IN (${uidList}))
+		`,
+		sql`
 			DELETE FROM imap_message_uids
 			WHERE imap_folder_id = ${source.folder.id} AND uid IN (${uidList})
 				AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = imap_message_uids.message_id AND ${inSource})
@@ -299,9 +310,25 @@ export async function relocateImapMessages(
 		`,
 	]);
 	const movedIds = new Set((updated.results as Array<{ id: string }>).map((row) => String(row.id)));
+	const destinations = new Map((placed.results as Array<{ uid: number; message_id: string; uid_validity: number }>).map((row) => [String(row.message_id), { uid: Number(row.uid), uidValidity: Number(row.uid_validity) }]));
 	const releasedRows = (released.results as Array<{ uid: number; message_id: string }>).map((row) => ({ uid: Number(row.uid), messageId: String(row.message_id) })).sort((a, b) => a.uid - b.uid);
-	return { released: releasedRows.map((row) => row.uid), moved: releasedRows.filter((row) => movedIds.has(row.messageId)) };
+	return {
+		released: releasedRows.map((row) => row.uid),
+		moved: releasedRows
+			.filter((row) => movedIds.has(row.messageId))
+			.map((row) => {
+				const placedAt = destinations.get(row.messageId);
+				return { ...row, destinationUid: placedAt?.uid ?? null, destinationUidValidity: placedAt?.uidValidity ?? null };
+			}),
+	};
 }
+
+/**
+ * A message one relocation batch moved: the source UID that named it and, as read inside the
+ * batch, the UID it holds in the destination and that folder's UIDVALIDITY (null only if the
+ * batch could not see one, in which case no COPYUID is reported).
+ */
+export type ImapRelocatedMessage = { uid: number; messageId: string; destinationUid: number | null; destinationUidValidity: number | null };
 
 /**
  * Who a permanent deletion acts for, re-checked inside the deleting statement itself so that a

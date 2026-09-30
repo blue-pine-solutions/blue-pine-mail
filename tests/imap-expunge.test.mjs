@@ -188,7 +188,7 @@ test("a5.2a/a5.2c: PERMANENTFLAGS include \\Deleted for a manager in every folde
 	const reader = await connect(context, SHARED);
 	assert.equal(permanent(await reader.client.command("SELECT INBOX")), "* OK [PERMANENTFLAGS (\\Seen \\Flagged)] Flags permitted");
 	const capability = texts(await context.client.command("CAPABILITY"))[0];
-	assert.equal(capability, "* CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE", "MOVE (A5.2b) and nothing else new: no UIDPLUS (A5.2c adds no capability)");
+	assert.equal(capability, "* CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS", "MOVE (A5.2b), UIDPLUS (A5.3) and nothing else new (A5.2c adds no capability)");
 });
 
 test("a5.2a: STORE \\Deleted with +FLAGS, -FLAGS, FLAGS and .SILENT; it persists across reconnects and is seen by a second session", async (t) => {
@@ -346,22 +346,24 @@ test("a5.2a: EXPUNGE in every recoverable folder moves to Trash (Trash and Draft
 	await assertInvariants(context, 5);
 });
 
-test("a5.2a: EXPUNGE under EXAMINE is refused, outside SELECT it is BAD, and UID EXPUNGE stays an unknown command", async (t) => {
+test("a5.2a/a5.3: EXPUNGE and UID EXPUNGE under EXAMINE are refused, outside SELECT they are BAD", async (t) => {
 	const context = await setup(t);
 	await deliverMany(context, ["m-1"]);
 	assertTagged(await context.client.command("EXPUNGE"), "BAD", /not valid in this state/);
+	assertTagged(await context.client.command("UID EXPUNGE 1"), "BAD", /not valid in this state/);
 	await context.client.command("SELECT INBOX");
 	await context.client.command("STORE 1 +FLAGS.SILENT (\\Deleted)");
 	const before = productState(context);
-	assertTagged(await context.client.command("UID EXPUNGE 1"), "BAD", /Unknown command/);
 	await context.client.command("EXAMINE INBOX");
 	assertTagged(await context.client.command("EXPUNGE"), "NO", /read-only/);
+	assertTagged(await context.client.command("UID EXPUNGE 1"), "NO", /read-only/);
 	assertTagged(await context.client.command("CLOSE"), "OK");
 	assert.equal(productState(context), before, "EXAMINE and its CLOSE never expunge");
 	await context.client.command("SELECT INBOX");
 	assertTagged(await context.client.command("UNSELECT"), "OK");
 	assert.equal(productState(context), before, "UNSELECT never expunges");
-	assertTagged(await context.client.command("UID EXPUNGE 1"), "BAD", /Unknown command/);
+	assertTagged(await context.client.command("UID EXPUNGE 1"), "BAD", /not valid in this state/);
+	assert.equal(productState(context), before);
 });
 
 // ---- CLOSE ------------------------------------------------------------------------------------

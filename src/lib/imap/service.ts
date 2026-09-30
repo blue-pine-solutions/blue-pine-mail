@@ -525,22 +525,31 @@ function expungeRefusal(opened: Opened): ImapStateError | null {
  *   date, stored bytes and attachments stay, and the message gets a new Trash UID without
  *   \Deleted.
  * - In Trash and Drafts it is permanent (A5.2c, permanentlyExpunge).
+ *
+ * `only` (UID EXPUNGE, RFC 4315, A5.3) narrows the candidates to the UIDs it lists: a message
+ * marked \Deleted but not listed, and a listed message not marked \Deleted, are untouched.
+ * It only ever removes candidates; every guard above, and the ones the batches repeat in their
+ * own SQL (the \Deleted mark on the exact UID, `maxUid`, membership, authority), still applies.
  */
-export async function expungeImapFolder(env: CloudflareEnv, principal: ImapPrincipal, key: ImapFolderKey, maxUid: number): Promise<number[]> {
+export async function expungeImapFolder(env: CloudflareEnv, principal: ImapPrincipal, key: ImapFolderKey, maxUid: number, only?: readonly number[]): Promise<number[]> {
 	const first = await open(env, principal, key);
 	const refusal = expungeRefusal(first);
 	if (refusal) throw refusal;
 	const folder = await findFolderRow(first.db, first.access.mailboxId, first.mailbox.key);
 	if (!folder) return [];
-	if (isPermanentlyExpungeable(first.mailbox.key)) return permanentlyExpunge(env, principal, first, folder, maxUid);
-	const candidates = (
-		await first.db
-			.select({ uid: imapMessageUids.uid })
-			.from(imapMessageUids)
-			.innerJoin(messages, eq(messages.id, imapMessageUids.messageId))
-			.where(and(eq(imapMessageUids.imapFolderId, folder.id), eq(imapMessageUids.deleted, true), lte(imapMessageUids.uid, maxUid), membershipCondition(first.access.mailboxId, first.mailbox.key)))
-			.orderBy(asc(imapMessageUids.uid))
-	).map((row) => row.uid);
+	const requested = only ? new Set(only) : null;
+	const listed = (uids: number[]) => (requested ? uids.filter((uid) => requested.has(uid)) : uids);
+	if (isPermanentlyExpungeable(first.mailbox.key)) return permanentlyExpunge(env, principal, first, folder, maxUid, listed);
+	const candidates = listed(
+		(
+			await first.db
+				.select({ uid: imapMessageUids.uid })
+				.from(imapMessageUids)
+				.innerJoin(messages, eq(messages.id, imapMessageUids.messageId))
+				.where(and(eq(imapMessageUids.imapFolderId, folder.id), eq(imapMessageUids.deleted, true), lte(imapMessageUids.uid, maxUid), membershipCondition(first.access.mailboxId, first.mailbox.key)))
+				.orderBy(asc(imapMessageUids.uid))
+		).map((row) => row.uid),
+	);
 	const expunged: number[] = [];
 	for (const [index, uidChunk] of chunk(candidates, RELOCATION_CHUNK).entries()) {
 		const opened = index === 0 ? first : await open(env, principal, key);
@@ -569,18 +578,20 @@ export async function expungeImapFolder(env: CloudflareEnv, principal: ImapPrinc
  *    messages' raw bytes and attachment objects, best effort: a failure leaves an orphaned
  *    object and a log line, never a restored row or a failed EXPUNGE.
  */
-async function permanentlyExpunge(env: CloudflareEnv, principal: ImapPrincipal, first: Opened, folder: ImapFolderRow, maxUid: number): Promise<number[]> {
+async function permanentlyExpunge(env: CloudflareEnv, principal: ImapPrincipal, first: Opened, folder: ImapFolderRow, maxUid: number, listed: (uids: number[]) => number[]): Promise<number[]> {
 	const key = first.mailbox.key as "trash" | "drafts";
 	if (key === "drafts") await releaseStaleDraftUids(first.db, folder, first.access.mailboxId);
 	const ownership = key === "drafts" ? eq(messages.userId, first.access.userId) : undefined;
-	const candidates = (
-		await first.db
-			.select({ uid: imapMessageUids.uid })
-			.from(imapMessageUids)
-			.innerJoin(messages, eq(messages.id, imapMessageUids.messageId))
-			.where(and(eq(imapMessageUids.imapFolderId, folder.id), eq(imapMessageUids.deleted, true), lte(imapMessageUids.uid, maxUid), membershipCondition(first.access.mailboxId, key), ownership))
-			.orderBy(asc(imapMessageUids.uid))
-	).map((row) => row.uid);
+	const candidates = listed(
+		(
+			await first.db
+				.select({ uid: imapMessageUids.uid })
+				.from(imapMessageUids)
+				.innerJoin(messages, eq(messages.id, imapMessageUids.messageId))
+				.where(and(eq(imapMessageUids.imapFolderId, folder.id), eq(imapMessageUids.deleted, true), lte(imapMessageUids.uid, maxUid), membershipCondition(first.access.mailboxId, key), ownership))
+				.orderBy(asc(imapMessageUids.uid))
+		).map((row) => row.uid),
+	);
 	const expunged: number[] = [];
 	for (const [index, uidChunk] of chunk(candidates, PERMANENT_DELETE_CHUNK).entries()) {
 		const opened = index === 0 ? first : await open(env, principal, key);
@@ -648,6 +659,9 @@ async function openMove(env: CloudflareEnv, principal: ImapPrincipal, key: ImapF
  * - Nothing else about a message changes: its row, bytes, size, date, read and starred
  *   state and attachments stay. Spam training is not part of the move; the caller runs
  *   trainImapSpamFeedback for `moved` afterwards when `training` says so.
+ * - Each moved entry carries the destination UID and UIDVALIDITY its batch read back from the
+ *   database (relocateImapMessages), for COPYUID (A5.3). Nothing is returned for a chunk that
+ *   did not commit.
  */
 export async function moveImapMessages(env: CloudflareEnv, principal: ImapPrincipal, key: ImapFolderKey, uids: number[], destinationKey: ImapFolderKey): Promise<ImapMoveResult> {
 	const wanted = [...new Set(uids.filter((uid) => Number.isInteger(uid) && uid >= 1))].sort((a, b) => a - b);

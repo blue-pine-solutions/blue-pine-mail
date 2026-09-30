@@ -64,6 +64,9 @@ async function deliverMany(context, ids, values) {
 const sql = (context, query, ...params) => context.database.db.prepare(query).all(...params);
 const one = (context, query, ...params) => context.database.db.prepare(query).get(...params);
 const mapping = (context, messageId) => sql(context, "SELECT f.folder_key AS folder, u.uid, u.deleted FROM imap_message_uids u JOIN imap_folders f ON f.id = u.imap_folder_id WHERE u.message_id = ? ORDER BY f.folder_key", messageId);
+const uidValidity = (context, key, mailboxId = "mbx-a") => one(context, "SELECT uid_validity FROM imap_folders WHERE mailbox_id = ? AND folder_key = ?", mailboxId, key)?.uid_validity;
+/** The COPYUID line a committed MOVE sends first (A5.3). */
+const copyUid = (context, key, source, destination, mailboxId = "mbx-a") => `* OK [COPYUID ${uidValidity(context, key, mailboxId)} ${source} ${destination}] Moved`;
 const uidNext = (context, key, mailboxId = "mbx-a") => one(context, "SELECT uid_next FROM imap_folders WHERE mailbox_id = ? AND folder_key = ?", mailboxId, key)?.uid_next;
 const where = (context, id) => {
 	const row = context.row(id);
@@ -124,7 +127,7 @@ const TRAINING = /spam_token_stats/;
 
 // ---- Protocol surface -------------------------------------------------------------------------
 
-test("a5.2b: MOVE is advertised after authentication only, alongside no UIDPLUS; malformed MOVE is BAD and changes nothing", async (t) => {
+test("a5.2b/a5.3: MOVE and UIDPLUS are advertised after authentication only; malformed MOVE is BAD and changes nothing", async (t) => {
 	const context = await install(app, t);
 	const { client, start } = memoryClient(app, context.env);
 	const greeting = await start();
@@ -132,10 +135,10 @@ test("a5.2b: MOVE is advertised after authentication only, alongside no UIDPLUS;
 	assert.deepEqual(texts(await client.command("CAPABILITY")), ["* CAPABILITY IMAP4rev1 SASL-IR AUTH=PLAIN ID"]);
 	assertTagged(await client.command("MOVE 1 Trash"), "BAD", /not valid in this state/);
 	const { credential } = await context.credential("user-a", "mbx-a");
-	assertTagged(await client.login("a@example.test", credential), "OK", /\[CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE\]/);
+	assertTagged(await client.login("a@example.test", credential), "OK", /\[CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS\]/);
 	const capability = texts(await client.command("CAPABILITY"))[0];
-	assert.equal(capability, "* CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE");
-	for (const absent of ["UIDPLUS", "IDLE", "CONDSTORE", "QRESYNC", "LITERAL+"]) assert.ok(!capability.split(" ").includes(absent), absent);
+	assert.equal(capability, "* CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS");
+	for (const absent of ["IDLE", "CONDSTORE", "QRESYNC", "LITERAL+"]) assert.ok(!capability.split(" ").includes(absent), absent);
 	assertTagged(await client.command("MOVE 1 Trash"), "BAD", /not valid in this state/, "authenticated but nothing selected");
 	assertTagged(await client.command("UID MOVE 1 Trash"), "BAD", /not valid in this state/);
 
@@ -147,8 +150,8 @@ test("a5.2b: MOVE is advertised after authentication only, alongside no UIDPLUS;
 		assertTagged(await client.command(command), "BAD", undefined, command);
 	}
 	assertTagged(await client.command("MOVE 3 Trash"), "BAD", /Invalid message sequence number/, "beyond the mailbox");
-	// Still unimplemented, as before A5.2b.
-	assertTagged(await client.command("UID EXPUNGE 1"), "BAD", /Unknown command/);
+	// UID EXPUNGE (A5.3) with nothing marked changes nothing; COPY is still unimplemented.
+	assertTagged(await client.command("UID EXPUNGE 1"), "OK");
 	assertTagged(await client.command("COPY 1 Trash"), "NO", /\[CANNOT\]/);
 	assertTagged(await client.command("UID COPY 1 Trash"), "NO", /\[CANNOT\]/);
 	assert.equal(productState(context), before);
@@ -173,7 +176,7 @@ test("a5.2b: MOVE is advertised after authentication only, alongside no UIDPLUS;
 
 // ---- MOVE and UID MOVE ------------------------------------------------------------------------
 
-test("a5.2b: MOVE relocates messages with fresh destination UIDs, EXPUNGE in the client's sequence space, no COPYUID, and nothing else changed", async (t) => {
+test("a5.2b: MOVE relocates messages with fresh destination UIDs, COPYUID, EXPUNGE in the client's sequence space, and nothing else changed", async (t) => {
 	const context = await setup(t);
 	await deliverMany(context, ["m-1", "m-2", "m-3", "m-4", "m-5", "m-6"]);
 	context.database.db.exec("UPDATE messages SET read = 1 WHERE id = 'm-2'; UPDATE messages SET starred = 1 WHERE id = 'm-4'");
@@ -193,8 +196,7 @@ test("a5.2b: MOVE relocates messages with fresh destination UIDs, EXPUNGE in the
 
 	const moved = await context.client.command("MOVE 2,4:5 Archive");
 	assertTagged(moved, "OK", /^\S+ OK MOVE completed$/);
-	assert.deepEqual(texts(moved), ["* 5 EXPUNGE", "* 4 EXPUNGE", "* 2 EXPUNGE"], "highest first, in the sequence numbers the client knew");
-	assert.ok(!moved.tagged.includes("COPYUID") && !texts(moved).some((line) => line.includes("COPYUID")));
+	assert.deepEqual(texts(moved), [copyUid(context, "archive", "2,4:5", `${archiveNext}:${archiveNext + 2}`), "* 5 EXPUNGE", "* 4 EXPUNGE", "* 2 EXPUNGE"], "COPYUID first (A5.3), then EXPUNGE highest first, in the sequence numbers the client knew");
 	for (const id of ["m-2", "m-4", "m-5"]) {
 		assert.deepEqual(where(context, id), { status: "archived", folder: null });
 		assert.equal(mapping(context, id).length, 1);
@@ -231,7 +233,7 @@ test("a5.2b: UID MOVE resolves stable UIDs, ignores UIDs that do not exist, move
 	await context.client.command("SELECT INBOX");
 	const moved = await context.client.command("UID MOVE 2,4,99 Work");
 	assertTagged(moved, "OK", /^\S+ OK UID MOVE completed$/);
-	assert.deepEqual(texts(moved), ["* 4 EXPUNGE", "* 2 EXPUNGE"]);
+	assert.deepEqual(texts(moved), [copyUid(context, "f:fld-work", "2,4", "1:2"), "* 4 EXPUNGE", "* 2 EXPUNGE"]);
 	assert.deepEqual(where(context, "m-2"), { status: "received", folder: "fld-work" });
 	assert.deepEqual(where(context, "m-4"), { status: "received", folder: "fld-work" });
 	assert.deepEqual(mapping(context, "m-2"), [{ folder: "f:fld-work", uid: 1, deleted: 0 }]);
@@ -257,7 +259,7 @@ test("a5.2b: a full 80-UID chunk and a multi-chunk MOVE: 170 messages, three ato
 	batches.stop();
 	assertTagged(moved, "OK");
 	assert.equal(batches.n, 3, "80 + 80 + 10");
-	assert.deepEqual(texts(moved), Array.from({ length: 170 }, (_, index) => `* ${170 - index} EXPUNGE`));
+	assert.deepEqual(texts(moved), [copyUid(context, "archive", "1:170", "1:170"), ...Array.from({ length: 170 }, (_, index) => `* ${170 - index} EXPUNGE`)], "one COPYUID covers every chunk");
 	assert.deepEqual(ids.map((id) => mapping(context, id)[0].uid), Array.from({ length: 170 }, (_, index) => index + 1));
 	assert.equal(uidNext(context, "archive"), 171);
 	assert.equal(one(context, "SELECT COUNT(*) AS n FROM messages WHERE status = 'archived'").n, 170);
@@ -325,12 +327,14 @@ test("a5.2b: the special-folder matrix: every source × destination, with Sent a
 			await context.deliver(id, `Subject: ${id}\r\n\r\n${id}\r\n`, { status: PLACE[source].status, folder_id: PLACE[source].folder, direction: outbound ? "outbound" : "inbound", from_addr: outbound ? "a@example.test" : "sender@elsewhere.test" });
 			await context.client.command(`SELECT ${source}`);
 			const before = productState(context);
-			const result = await context.client.command(`UID MOVE ${mapping(context, id)[0].uid} ${destination}`);
+			const sourceUid = mapping(context, id)[0].uid;
+			const result = await context.client.command(`UID MOVE ${sourceUid} ${destination}`);
 			const label = `${source} -> ${destination}`;
 			if (ALLOWED[source].includes(destination)) {
 				assertTagged(result, "OK", undefined, label);
-				assert.equal(texts(result).length, 1, label);
-				assert.match(texts(result)[0], /^\* \d+ EXPUNGE$/, label);
+				assert.equal(texts(result).length, 2, label);
+				assert.equal(texts(result)[0], copyUid(context, mapping(context, id)[0].folder, sourceUid, mapping(context, id)[0].uid), `${label}: COPYUID with the destination's UIDVALIDITY and allocated UID`);
+				assert.match(texts(result)[1], /^\* \d+ EXPUNGE$/, label);
 				assert.deepEqual(where(context, id), PLACE[destination], label);
 				assert.equal(mapping(context, id).length, 1, label);
 				assert.equal(mapping(context, id)[0].deleted, 0, label);
@@ -454,9 +458,11 @@ test("a5.2b: Drafts move only to Trash and only for their author; a manager cann
 	assertTagged(await context.client.command("MOVE 1:2 Trash"), "NO", /\[NOPERM\]/, "a set including another user's draft moves nothing");
 	assert.equal(productState(context), before);
 	assertTagged(await context.client.command(`UID MOVE ${uidOf("d-x")} Archive`), "NO", /\[CANNOT\] Drafts can only be moved to Trash/);
-	const own = await context.client.command(`UID MOVE ${uidOf("d-x")} Trash`);
+	const draftUid = uidOf("d-x");
+	const own = await context.client.command(`UID MOVE ${draftUid} Trash`);
 	assertTagged(own, "OK");
-	assert.equal(texts(own).length, 1);
+	assert.equal(texts(own).length, 2);
+	assert.equal(texts(own)[0], copyUid(context, "trash", draftUid, uidOf("d-x"), "mbx-s"), "COPYUID into Trash");
 	assert.deepEqual(where(context, "d-x"), { status: "trash", folder: null });
 	assert.equal(context.row("d-x").direction, "outbound");
 	assert.equal(context.row("d-a").status, "draft");
@@ -501,7 +507,7 @@ test("a5.2b: MOVE racing a web move, a JMAP move or a second IMAP MOVE never ove
 		beforeBatch(context, RELOCATION, () => race(context));
 		const result = await context.client.command("MOVE 1:3 Trash");
 		assertTagged(result, "NO", /no longer exist/, name);
-		assert.deepEqual(texts(result), ["* 3 EXPUNGE", "* 2 EXPUNGE", "* 1 EXPUNGE"], `${name}: every message that left is reported`);
+		assert.deepEqual(texts(result), [copyUid(context, "trash", "1,3", "1:2"), "* 3 EXPUNGE", "* 2 EXPUNGE", "* 1 EXPUNGE"], `${name}: COPYUID names only what this MOVE moved; every message that left is reported`);
 		assert.deepEqual(where(context, "m-2"), { status: "archived", folder: null }, `${name}: the other move stands`);
 		assert.deepEqual(mapping(context, "m-2").map((row) => row.folder).filter((folder) => folder !== "archive"), [], `${name}: no UID for m-2 outside Archive`);
 		assert.equal(context.row("m-1").status, "trash", name);
@@ -592,7 +598,7 @@ test("a5.2b: source membership changing after the snapshot: only real members mo
 	beforeBatch(context, RELOCATION, () => context.database.db.exec("UPDATE messages SET read = 1, starred = 1 WHERE id = 'm-1'; UPDATE messages SET status = 'spam' WHERE id = 'm-2'"));
 	const result = await context.client.command("MOVE 1:3 Archive");
 	assertTagged(result, "NO", /no longer exist/);
-	assert.deepEqual(texts(result), ["* 3 EXPUNGE", "* 2 EXPUNGE", "* 1 EXPUNGE"]);
+	assert.deepEqual(texts(result), [copyUid(context, "archive", "1,3", "1:2"), "* 3 EXPUNGE", "* 2 EXPUNGE", "* 1 EXPUNGE"]);
 	assert.deepEqual(where(context, "m-1"), { status: "archived", folder: null });
 	assert.equal(context.row("m-1").read, 1);
 	assert.deepEqual(where(context, "m-2"), { status: "spam", folder: null }, "moved elsewhere meanwhile: stays there");
@@ -766,7 +772,7 @@ test("a5.2b: a spam-training failure after a committed MOVE leaves the message m
 	});
 	const result = await context.client.command("MOVE 1 Spam");
 	assertTagged(result, "OK", /MOVE completed/);
-	assert.deepEqual(texts(result), ["* 1 EXPUNGE"]);
+	assert.deepEqual(texts(result), [copyUid(context, "junk", "1", "1"), "* 1 EXPUNGE"], "the move committed, so COPYUID is reported whatever the training does");
 	assert.deepEqual(where(context, "m-1"), { status: "spam", folder: null });
 	assert.deepEqual(mapping(context, "m-1").map((row) => [row.folder, row.deleted]), [["junk", 0]]);
 	assert.equal(feedback(context, "m-1"), null, "moved but untrained");
@@ -811,6 +817,6 @@ test("a5.2b: the service refuses what the listener refuses: same folder, bad des
 	assert.equal(await code(app.imap.moveImapMessages(context.env, { userId: "user-x", mailboxId: "mbx-a" }, "inbox", [1], "trash")), "forbidden");
 	assert.equal(context.row("m-1").status, "received");
 	const result = await app.imap.moveImapMessages(context.env, OWNER, "inbox", [1, 1, 0, -1, 2.5, 77], "archive");
-	assert.deepEqual(result, { moved: [{ uid: 1, messageId: "m-1" }], training: null });
+	assert.deepEqual(result, { moved: [{ uid: 1, messageId: "m-1", destinationUid: 1, destinationUidValidity: uidValidity(context, "archive") }], training: null });
 	await assertInvariants(context, 1);
 });

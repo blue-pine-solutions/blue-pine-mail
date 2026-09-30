@@ -121,8 +121,12 @@ export type ImapStateErrorCode = "forbidden" | "denied" | "unsupported" | "nonex
 export type ImapMoveTarget = { status: string; folderId: string | null; training: "spam" | "ham" | null };
 
 export type ImapMoveResult = {
-	/** Source UIDs this MOVE relocated, ascending, with the message each named. */
-	moved: Array<{ uid: number; messageId: string }>;
+	/**
+	 * Source UIDs this MOVE relocated, ascending, with the message each named and the UID it
+	 * now holds in the destination with that folder's UIDVALIDITY, as the committing batch read
+	 * them (null only when the batch could not see one; COPYUID is then not reported).
+	 */
+	moved: Array<{ uid: number; messageId: string; destinationUid: number | null; destinationUidValidity: number | null }>;
 	/** The spam training the moved inbound messages call for (trainImapSpamFeedback), or null. */
 	training: "spam" | "ham" | null;
 };

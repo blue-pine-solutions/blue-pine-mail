@@ -300,7 +300,7 @@ test("gate7: an end-to-end session over TLS", async (t) => {
 	const { listener, good, bytes, database, row } = await populated(t);
 	const { client } = await connected(listener.port);
 	assert.deepEqual((await client.command("CAPABILITY")).untagged.map((unit) => unit.text), ["* CAPABILITY IMAP4rev1 SASL-IR AUTH=PLAIN ID"]);
-	assertTagged(await client.command(`AUTHENTICATE PLAIN ${Buffer.from(`\0a@example.test\0${good}`).toString("base64")}`), "OK", /\[CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE\]/);
+	assertTagged(await client.command(`AUTHENTICATE PLAIN ${Buffer.from(`\0a@example.test\0${good}`).toString("base64")}`), "OK", /\[CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS\]/);
 	const list = await client.command('LIST "" "*"');
 	assert.equal(list.untagged.length, 8, "six system folders, Work and the Unicode folder");
 	assert.equal(list.untagged.at(-1).text, '* LIST (\\Noinferiors) NIL "Caf&AOk-/&ANw-n&AO8-code"');
@@ -479,7 +479,7 @@ print(json.dumps(out))
 		child.on("close", (code) => (code === 0 ? resolve(JSON.parse(stdout)) : reject(new Error(stderr))));
 	});
 	assert.ok(!result.pre.includes("MOVE"), "MOVE is not advertised before authentication");
-	assert.ok(result.post.includes("MOVE") && !result.post.includes("UIDPLUS"), result.post.join(" "));
+	assert.ok(result.post.includes("MOVE") && result.post.includes("UIDPLUS"), result.post.join(" "));
 	assert.deepEqual(result.move, ["OK", "MOVE completed", ["1"]]);
 	assert.deepEqual(result.uid_move, ["OK", ["1"]]);
 	assert.equal(result.inbox, "0");
@@ -500,7 +500,7 @@ test("a5.2b: curl IMAPS MOVE and UID MOVE through custom requests", { skip: !try
 	assert.equal(moved.status, 0, moved.stderr);
 	assert.match(moved.stderr, /^< \* 1 EXPUNGE\r?$/m);
 	assert.match(moved.stderr, /^< \S+ OK MOVE completed\r?$/m);
-	assert.doesNotMatch(moved.stderr, /COPYUID/);
+	assert.match(moved.stderr, /^< \* OK \[COPYUID \d+ 1 1\] Moved\r?$/m, "UIDPLUS (A5.3): COPYUID before the EXPUNGE");
 	const toCustom = await curl("/INBOX", ["--verbose", "--request", "UID MOVE 2 Work"]);
 	assert.equal(toCustom.status, 0, toCustom.stderr);
 	assert.match(toCustom.stderr, /^< \* 1 EXPUNGE\r?$/m);

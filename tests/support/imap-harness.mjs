@@ -20,7 +20,7 @@ export async function loadApp(name) {
 	await build({
 		stdin: {
 			contents: `
-				export { ImapSession, PREAUTH_CAPABILITIES, AUTH_CAPABILITIES } from "./src/lib/imap-server/session.ts";
+				export { ImapSession, PREAUTH_CAPABILITIES, AUTH_CAPABILITIES, copyUidData } from "./src/lib/imap-server/session.ts";
 				export { MetadataCache } from "./src/lib/imap-server/metadata-cache.ts";
 				export * as mime from "./src/lib/imap-server/mime.ts";
 				export * as names from "./src/lib/imap-server/mailbox-names.ts";

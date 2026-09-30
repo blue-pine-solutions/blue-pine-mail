@@ -226,10 +226,15 @@ test("the IMAP state layer, flag writes included, stays Workers/D1-safe", () => 
 		const callers = [...sourceFiles("src"), "worker.ts", "worker-utils.ts"].filter((file) => new RegExp(`\\b${writer}\\(`).test(read(file)) && dirname(file) !== join("src", "lib", "imap"));
 		assert.deepEqual(callers, [join("src", "lib", "imap-server", "session.ts")], writer);
 	}
-	// MOVE advertises no UIDPLUS, so it never sends COPYUID.
+	// UIDPLUS (A5.3): COPYUID is sent in exactly one place, MOVE, from the mapping the relocation
+	// batch read back (copyUidData); APPEND and COPY, which would owe APPENDUID and COPYUID, are
+	// still refused before any storage call.
 	const session = read(join("src", "lib", "imap-server", "session.ts"));
-	assert.doesNotMatch(session, /\[COPYUID/);
-	assert.doesNotMatch(session.match(/export const AUTH_CAPABILITIES = "([^"]*)"/)[1], /UIDPLUS/);
+	assert.equal(session.match(/`\* OK \[COPYUID \$\{/g)?.length, 1);
+	assert.match(session, /const copyUid = copyUidData\(result\.moved\);/);
+	assert.doesNotMatch(session, /\[APPENDUID/);
+	assert.match(session.match(/export const AUTH_CAPABILITIES = "([^"]*)"/)[1], /(^| )UIDPLUS( |$)/);
+	assert.match(session, /const UNSUPPORTED_COMMANDS = new Set\(\["COPY", "APPEND", "CREATE", "DELETE", "RENAME", "SUBSCRIBE", "UNSUBSCRIBE"\]\);/);
 });
 
 const workersBuild = join(root, "dist", "server");
