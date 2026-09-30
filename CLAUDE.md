@@ -75,7 +75,7 @@ Auth is `CF_TOKEN` (preferred) or the legacy `CF_EMAIL` + `CF_API_KEY` pair.
 
 ### Schema and the dual-migration gotcha
 
-Schema lives in one file: `src/db/schema/index.ts` (21 tables). Migrations are generated into `drizzle/migrations/`. Note that `drizzle-kit generate` currently prompts interactively about a snapshot rename conflict, so recent migrations were hand-written to match the generated style.
+Upstream schema lives in one file: `src/db/schema/index.ts` (21 tables); Blue Pine-owned tables are in `src/db/schema/bluepine.ts`. Migrations are generated into `drizzle/migrations/`. Note that `drizzle-kit generate` currently prompts interactively about a snapshot rename conflict, so recent migrations were hand-written to match the generated style.
 
 `npm run db:bundle` packages the SQL files for the Worker. `/api/setup/prepare` and the admin migration endpoint use the shared runner in `src/lib/migrations/service.ts`; migration files remain the only schema history to maintain. Build, deploy, preview, and development scripts generate the bundle before loading application code.
 
@@ -139,7 +139,7 @@ This repository is **Blue Pine Solutions Mail**, a downstream distribution deriv
 
 - **Engine follows upstream, product layer is Blue Pine's.** Schema, migrations, mail pipeline, routing, SMTP, JMAP, API v1, MCP tools, relay protocol, auth and runtime contracts stay upstream-shaped. Identity, feature policy, commercial policy, branding policy, legal/source surfaces, the release channel and operations belong to Blue Pine.
 - **Never casually rename compatibility-sensitive `mailflare` identifiers** (headers, stored HTML markers, backup format id, storage keys, env vars, `mailflare.sqlite`, ICS UIDs). The full list is in `UPSTREAM.md`. The word "Mailflare" in code is not by itself a reason to change it.
-- **Upstream migrations are taken verbatim and in order.** Never edit, skip, reorder or renumber them. Do not add downstream migrations unless `UPSTREAM.md` is updated first.
+- **Upstream migrations are taken verbatim and in order.** Never edit, skip, reorder or renumber them. Blue Pine migrations use the `bpNNNN_*.sql` namespace described in `UPSTREAM.md` ("Downstream migrations"): they sort after every upstream migration in all three runners, are never listed in the drizzle journal, and their tables live in `src/db/schema/bluepine.ts`, outside drizzle-kit's input. Read that section before adding one.
 - **Product policy belongs to Blue Pine.** Optional features are gated by the Blue Pine distribution policy in `src/lib/distribution/`; upstream's licensing layer has been removed. Upstream changes that add license or commercial gates must be translated to feature policy, not merged as-is.
 - **Prefer offering generic engine fixes upstream** so downstream divergence shrinks.
 - **Identity and source offer:** product, distributor, version and upstream attribution come from `src/lib/distribution/identity.ts`; `/about` and `/source` (the AGPL source offer) must stay reachable from the footer and auth screens. See `UPSTREAM.md`.

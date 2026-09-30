@@ -9,6 +9,14 @@ const BACKUP_TABLES: DatabaseBackupTable[] = ["users", "domains", "mailboxes", "
  * optional here and are filled in as empty on restore.
  */
 const REQUIRED_BACKUP_TABLES: DatabaseBackupTable[] = ["users", "domains", "mailboxes", "mailbox_access", "contacts", "folders", "api_keys", "messages", "message_attachments", "outbound_jobs", "routing_rules", "webhooks", "webhook_deliveries", "sessions", "audit_logs", "backup_settings", "backups", "app_settings", "license_settings"];
+/**
+ * Blue Pine-owned tables (UPSTREAM.md, "Downstream migrations"). They are exported under
+ * `tables` but never named in `includedTables`: upstream Mailflare rejects a document whose
+ * `includedTables` lists a table it does not know and ignores extra `tables` entries, so a
+ * Blue Pine backup still restores there, without the Blue Pine data.
+ */
+const DOWNSTREAM_BACKUP_TABLES: DatabaseBackupTable[] = ["mail_app_passwords"];
+const ALL_BACKUP_TABLES: DatabaseBackupTable[] = [...BACKUP_TABLES, ...DOWNSTREAM_BACKUP_TABLES];
 const INSERT_BATCH_SIZE = 50;
 
 export function getBackupConfigurationStatus(_env?: CloudflareEnv) {
@@ -45,11 +53,11 @@ export async function assertBackupTablesCoverDatabase(db: D1Database): Promise<S
 	const result = await db
 		.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND ${conditions}`)
 		.all<{ name: string }>();
-	const covered = new Set<string>(BACKUP_TABLES);
+	const covered = new Set<string>(ALL_BACKUP_TABLES);
 	const unlisted = result.results.map((row) => row.name).filter((name) => !covered.has(name));
-	if (unlisted.length) throw new Error(`Backup aborted: ${unlisted.join(", ")} not listed in BACKUP_TABLES. Add new tables to src/lib/backups/export.ts and assign each to a group in table-groups.ts.`);
+	if (unlisted.length) throw new Error(`Backup aborted: ${unlisted.join(", ")} not listed in BACKUP_TABLES or DOWNSTREAM_BACKUP_TABLES. Add new tables to src/lib/backups/export.ts and assign each to a group in table-groups.ts.`);
 	const assigned = BACKUP_TABLE_GROUPS.flatMap((group) => group.tables);
-	const ungrouped = BACKUP_TABLES.filter((table) => assigned.filter((item) => item === table).length !== 1);
+	const ungrouped = ALL_BACKUP_TABLES.filter((table) => assigned.filter((item) => item === table).length !== 1);
 	const unknown = assigned.filter((table) => !covered.has(table));
 	if (ungrouped.length || unknown.length) throw new Error(`Backup aborted: table groups are out of sync (${[...ungrouped, ...unknown].join(", ")}). Update src/lib/backups/table-groups.ts.`);
 	return new Set(result.results.map((row) => row.name));
@@ -69,6 +77,10 @@ export async function exportDatabaseRecords(db: D1Database, excludedGroups: Back
 		const result = await db.prepare(`SELECT * FROM ${table}`).all<DatabaseRecord>();
 		tables[table] = result.results;
 	}
+	for (const table of DOWNSTREAM_BACKUP_TABLES) {
+		if (!selected.has(table) || !databaseTables.has(table)) continue;
+		tables[table] = (await db.prepare(`SELECT * FROM ${table}`).all<DatabaseRecord>()).results;
+	}
 	const document: DatabaseBackupDocument = { format: "mailflare-database-backup", version: 1, createdAt: new Date().toISOString(), includedTables, tables };
 	return new TextEncoder().encode(JSON.stringify(document));
 }
@@ -81,7 +93,14 @@ export async function restoreDatabaseRecords(db: D1Database, content: ArrayBuffe
 	validateDatabaseBackup(document);
 	const sharedLinksTable = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'shared_attachment_links'").first<{ name: string }>();
 	if (!sharedLinksTable && document.tables.shared_attachment_links?.length) throw new Error("Apply pending database migrations before restoring shared attachment links.");
-	const restoreTables = sharedLinksTable ? BACKUP_TABLES : BACKUP_TABLES.filter((table) => table !== "shared_attachment_links");
+	const downstreamTables: DatabaseBackupTable[] = [];
+	for (const table of DOWNSTREAM_BACKUP_TABLES) {
+		const present = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").bind(table).first<{ name: string }>();
+		if (present) downstreamTables.push(table);
+		else if (document.tables[table]?.length) throw new Error(`Apply pending database migrations before restoring ${table}.`);
+	}
+	// Downstream tables reference upstream ones, so they are cleared first and filled last.
+	const restoreTables = [...(sharedLinksTable ? BACKUP_TABLES : BACKUP_TABLES.filter((table) => table !== "shared_attachment_links")), ...downstreamTables];
 	for (const table of [...restoreTables].reverse()) await db.prepare(`DELETE FROM ${table}`).run();
 	for (const table of restoreTables) {
 		const rows = document.tables[table] ?? [];
@@ -107,7 +126,7 @@ function isDatabaseBackupDocument(value: unknown): value is DatabaseBackupDocume
 		if (!Array.isArray(document.includedTables) || !document.includedTables.length || new Set(document.includedTables).size !== document.includedTables.length) return false;
 		if (!document.includedTables.every((table) => BACKUP_TABLES.includes(table) && Array.isArray(document.tables?.[table]))) return false;
 	} else if (!REQUIRED_BACKUP_TABLES.every((table) => Array.isArray(document.tables?.[table]))) return false;
-	return BACKUP_TABLES.every((table) => {
+	return ALL_BACKUP_TABLES.every((table) => {
 		const rows = document.tables?.[table];
 		return rows === undefined || Array.isArray(rows);
 	});
@@ -123,13 +142,13 @@ function createInsertStatement(db: D1Database, table: DatabaseBackupTable, row: 
 
 /** Backups written before a table joined BACKUP_TABLES simply omit it. */
 function fillMissingBackupTables(document: DatabaseBackupDocument): void {
-	for (const table of BACKUP_TABLES) {
+	for (const table of ALL_BACKUP_TABLES) {
 		if (!document.tables[table]) document.tables[table] = [];
 	}
 }
 
 function validateDatabaseBackup(document: DatabaseBackupDocument): void {
-	for (const table of BACKUP_TABLES) {
+	for (const table of ALL_BACKUP_TABLES) {
 		for (const row of document.tables[table] ?? []) {
 			if (!row || typeof row !== "object" || Array.isArray(row)) {
 				throw new Error(`Backup contains an invalid ${table} record`);

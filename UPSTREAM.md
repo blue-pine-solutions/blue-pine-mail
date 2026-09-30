@@ -106,6 +106,58 @@ The public repository is the Corresponding Source for every build offered to use
 6. Merge into `main` through a reviewed pull request with a merge commit.
 7. **Security fast lane:** an urgent upstream security fix may be cherry-picked directly onto `main` and released. The next scheduled merge reconciles it.
 
+## Downstream migrations
+
+Blue Pine may own schema for Blue Pine features (for example mail app passwords). Upstream migrations stay verbatim and in upstream order; Blue Pine migrations live beside them in a separate namespace that every migration runner orders after them.
+
+### How the runners behave
+
+There are three runners, and all of them record applied migrations by file name in `d1_migrations`, so a file applies once per database whatever its position:
+
+| Runner | Used by | Order |
+|---|---|---|
+| `server/runtime/migrate.ts` | Node / Docker, at start | `drizzle/migrations/meta/_journal.json` entries first, then every other `.sql` file by JavaScript string order |
+| `src/lib/migrations/service.ts` over `bundle.json` | Workers: setup and Admin → Version and updates | every `.sql` file by JavaScript string order (`scripts/generate-migration-bundle.mjs`) |
+| `wrangler d1 migrations apply` | `npm run migrate`, `db:migrate:*` | files with a numeric prefix by that number, then files without one by string order |
+
+Upstream's hand-written `0021_add_api_keys_prefix_index.sql` is not in the journal, so the Node runner applies it after `0040` while the other two apply it after `0021_add_mailbox_signature.sql`. That existing difference is harmless because the statement is independent, and it shows the rule Blue Pine migrations must follow: never depend on a position relative to an upstream migration that is not already applied.
+
+### Naming and ordering
+
+- Blue Pine migrations are named `bpNNNN_<snake_case_description>.sql`: lowercase `bp`, four digits starting at `0001`, contiguous, never reused. Example: `bp0001_add_mail_app_passwords.sql`.
+- `bp` sorts after every digit and has no numeric prefix, so all three runners apply Blue Pine migrations after every upstream migration present in the same build, in `bpNNNN` order. Wrangler's next-number logic ignores them, so upstream-style numbering is unaffected.
+- Blue Pine migrations are hand-written and never listed in the drizzle journal. Blue Pine tables are declared in `src/db/schema/bluepine.ts`, which drizzle-kit does not read (`drizzle.config.ts` points at `index.ts`), so a future `drizzle-kit generate` never emits an upstream-numbered copy of them.
+- A Blue Pine migration may depend only on upstream schema that existed when it was written. On a database created later, upstream migrations newer than it run before it; on an existing database they run after it. Write Blue Pine migrations so either order gives the same result, and never alter, drop or rebuild an upstream table from one.
+
+### Ownership and changes
+
+- Blue Pine owns `bp*` files and `src/db/schema/bluepine.ts`. Upstream owns every numbered file.
+- Never edit a `bp` migration once it has been merged to `main`: installations have recorded it. Fix forward with the next `bpNNNN`.
+- Never rename, renumber or delete one. There is no down-migration; recovery is a restore from backup (below) or a forward fix.
+- `tests/downstream-migrations.test.mjs` enforces the naming, contiguity, journal exclusion, ordering in all three runners and the rebuild guard below.
+
+### Upstream merges
+
+- Upstream never touches `bp*` files, so file-level conflicts cannot occur. A conflict in `src/db/schema/index.ts` or `src/lib/backups/` is resolved in upstream's favour, then Blue Pine's additions (below) are re-applied.
+- **Table rebuilds.** SQLite changes some columns by creating a new table, copying, dropping the old one and renaming. Dropping a table drops its triggers, and on D1 (where foreign keys cannot be switched off) the drop can cascade into child tables. Blue Pine migrations attach triggers or foreign keys to `users`, `mailboxes`, `domains` and `mailbox_access`. The guard test fails if any upstream migration drops or renames one of those tables. When it fails during an integration: verify on a copy of real data what happens to `mail_app_passwords` rows, and add a `bpNNNN` migration that recreates the Blue Pine triggers (and repairs data if the cascade removed it) before merging.
+- **Triggers and indexes.** Blue Pine triggers are named `bp_*` and Blue Pine indexes carry the Blue Pine table's name, so they cannot collide with upstream names. Check new upstream triggers on the same tables for interaction (upstream's own are `messages_fts_*` and `jmap_messages_*`, on `messages`).
+
+### Backups
+
+- Every Blue Pine table must be listed in `DOWNSTREAM_BACKUP_TABLES` and assigned to a group in `src/lib/backups/table-groups.ts` in the same change that creates it; the coverage check aborts backups otherwise, and it must not be weakened.
+- Downstream tables are written under `tables` but never listed in `includedTables`. Upstream Mailflare rejects a document whose `includedTables` names a table it does not know, and ignores extra entries under `tables`, so Blue Pine backups stay restorable into upstream (dropping the Blue Pine data) and upstream backups restore into Blue Pine (leaving the Blue Pine tables empty). The backup format id and version stay `mailflare-database-backup` / `1`.
+- A restore replaces Blue Pine tables like every other table: the database returns to the state of the backup, including credentials revoked since. Restoring a backup into a build that has not applied a Blue Pine migration yet fails with an instruction to apply pending migrations first when the backup carries rows for that table.
+
+### Certification for a new Blue Pine migration
+
+Before a `bp` migration reaches `main`: `node --test tests/*.test.mjs` (fresh database, existing-database upgrade, second run applies nothing, ordering, backup coverage and round-trip), `npm run build` (the bundle contains the file last), `npm run build:node` and a Node start against a copy of an existing data volume (only the new file applies, a restart applies nothing), `wrangler d1 migrations apply --local` against an existing local database, and a backup and restore on the upgraded database.
+
+### Current Blue Pine migrations
+
+| File | Adds |
+|---|---|
+| `bp0001_add_mail_app_passwords.sql` | `mail_app_passwords`; triggers `bp_mail_app_passwords_revoke_on_password_change` (on `users`) and `bp_mail_app_passwords_revoke_on_access_removal` (on `mailbox_access`) |
+
 ## Downstream changes to offer upstream
 
 - `40720fb` — manual domain setup without Cloudflare credentials, manual-mode MX setup, inbound SMTP recipient validation.
