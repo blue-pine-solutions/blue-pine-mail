@@ -157,6 +157,24 @@ Before a `bp` migration reaches `main`: `node --test tests/*.test.mjs` (fresh da
 | File | Adds |
 |---|---|
 | `bp0001_add_mail_app_passwords.sql` | `mail_app_passwords`; triggers `bp_mail_app_passwords_revoke_on_password_change` (on `users`) and `bp_mail_app_passwords_revoke_on_access_removal` (on `mailbox_access`) |
+| `bp0002_add_imap_mailbox_state.sql` | `imap_folders` (foreign key to `mailboxes`), `imap_message_uids`; triggers `bp_imap_message_uids_advance_uid_next`, `bp_imap_message_uids_immutable` and `bp_imap_folders_monotonic`, all on the Blue Pine tables themselves |
+
+## IMAP mailbox state
+
+`src/lib/imap/` holds the storage contract a future IMAP listener consumes; it has no listener, parser or protocol dependency. It reads the upstream mail model and never changes it.
+
+- **Folders.** INBOX (`status = 'received'`, no folder), Drafts (`draft`), Sent (`sent`), Archive (`archived`), Spam (`spam`, special-use Junk), Trash (`trash`) and one folder per row of `folders` (`received` mail filed there). This is the web app's partition: a custom folder only holds `received` mail, so a message moved to Trash from a folder is in Trash. Queued and failed sends are not IMAP-visible (their representation is generated per read), and snoozing does not hide mail, as in JMAP.
+- **Identity.** `imap_folders` keeps UIDVALIDITY and UIDNEXT per (mailbox, folder key); `imap_message_uids` keeps the UID a message holds in the folder it is in. A message that leaves a folder (any status or folder change, or deletion, by any code path) loses that UID the next time the folder is read and receives the next UID of its new folder; UIDs are never reused, because UIDNEXT only increases (enforced by triggers) and moves inside the same statement that assigns UIDs. A folder's existing mail gets UIDs on its first read, oldest first (`created_at`, then `id`), in bounded chunks. Draft UIDs are bound to A1's draft fingerprint and to the stored object first served, so an edited draft gets a new UID instead of new bytes under an old one.
+- **UIDVALIDITY** is set when a folder's state row is created (the current Unix time, above every value the mailbox has used) and changes only when a restore replaces state clients may have seen (`src/lib/imap/restore.ts`). Upgrades and restarts never change it.
+- **Nothing is attached to `messages` or `folders`.** No trigger and no foreign key, so an upstream rebuild of either cannot drop Blue Pine state; state is reconciled by join on read. The guard test fails if a Blue Pine migration attaches to an upstream table outside the anchored list.
+
+When an upstream integration touches the mail model, certify before merging:
+
+1. `messages.id` values survive any rebuild of `messages` (UIDs refer to them). If ids were rewritten, affected messages simply get new UIDs; raise UIDVALIDITY with a `bpNNNN` migration if the whole mapping should be discarded instead.
+2. The meaning of `messages.status` values and of `folder_id` still matches `folderKeyForMessage` and `membershipCondition` in `src/lib/imap/`; a new status must be mapped or deliberately left invisible.
+3. `folders.id` stays stable across renames (IMAP keeps UIDVALIDITY through a rename).
+4. A rebuild of `mailboxes` is caught by the anchored-table guard (it would cascade into `imap_folders` on D1).
+5. `node --test tests/*.test.mjs` (including `tests/imap-state.test.mjs`, SQLite) and `node scripts/imap-state-d1-check.mjs` (the same layer in workerd over D1 and R2) pass on the integrated tree.
 
 ## Downstream changes to offer upstream
 

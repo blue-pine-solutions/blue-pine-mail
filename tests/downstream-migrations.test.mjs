@@ -107,6 +107,18 @@ test("Blue Pine migrations only create their own objects and never alter or drop
 	}
 });
 
+test("Blue Pine migrations attach triggers and foreign keys only to the anchored upstream tables", () => {
+	// IMAP state (bp0002) deliberately has neither on `messages` or `folders`, which it reads by join.
+	for (const name of downstreamFiles) {
+		const sql = readFileSync(join(migrationsDirectory, name), "utf8").replace(/--[^\n]*/g, "");
+		const targets = [
+			...[...sql.matchAll(/\bCREATE\s+TRIGGER\s+[`"]?\w+[`"]?[^;]*?\bON\s+[`"]?(\w+)/gi)].map((match) => match[1]),
+			...[...sql.matchAll(/\bREFERENCES\s+[`"]?(\w+)/gi)].map((match) => match[1]),
+		];
+		for (const table of targets) assert.ok(downstreamTables.includes(table) || ANCHORED_UPSTREAM_TABLES.includes(table), `${name} attaches to upstream table ${table}; add it to ANCHORED_UPSTREAM_TABLES and UPSTREAM.md first`);
+	}
+});
+
 test("no upstream migration drops or renames a table Blue Pine attaches foreign keys or triggers to", () => {
 	// When this fails during an upstream integration, follow UPSTREAM.md "Table rebuilds":
 	// check what the rebuild does to Blue Pine rows and add a bpNNNN repair migration.
@@ -172,8 +184,14 @@ test("a migrated database has the Blue Pine table, indexes and triggers, and eve
 	await app.applyMigrations(database, migrationsDirectory);
 	const names = (type) => database.db.prepare("SELECT name FROM sqlite_master WHERE type = ? ORDER BY name").all(type).map((row) => row.name);
 	for (const table of downstreamTables) assert.ok(names("table").includes(table), table);
-	assert.deepEqual(names("trigger").filter((name) => name.startsWith("bp_")), ["bp_mail_app_passwords_revoke_on_access_removal", "bp_mail_app_passwords_revoke_on_password_change"]);
-	assert.ok(names("index").includes("mail_app_passwords_public_id_idx"));
+	assert.deepEqual(names("trigger").filter((name) => name.startsWith("bp_")), [
+		"bp_imap_folders_monotonic",
+		"bp_imap_message_uids_advance_uid_next",
+		"bp_imap_message_uids_immutable",
+		"bp_mail_app_passwords_revoke_on_access_removal",
+		"bp_mail_app_passwords_revoke_on_password_change",
+	]);
+	for (const index of ["mail_app_passwords_public_id_idx", "imap_folders_mailbox_key_idx", "imap_message_uids_folder_message_idx", "imap_message_uids_message_idx"]) assert.ok(names("index").includes(index), index);
 	const covered = await app.assertBackupTablesCoverDatabase(database);
 	for (const table of downstreamTables) assert.ok(covered.has(table));
 	const exportSource = read("src/lib/backups/export.ts");

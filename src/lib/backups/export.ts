@@ -1,6 +1,7 @@
 import type { BackupTableGroupId, DatabaseBackupDocument, DatabaseBackupTable, DatabaseRecord } from "./types";
 import { mergeLegacyMessageBodies } from "./utils";
 import { BACKUP_TABLE_GROUPS, getSelectedBackupTables } from "./table-groups";
+import { captureImapStateForRestore, reconcileImapStateAfterRestore } from "@/lib/imap/restore";
 
 const BACKUP_TABLES: DatabaseBackupTable[] = ["users", "domains", "mailboxes", "mailbox_access", "contacts", "folders", "api_keys", "messages", "message_attachments", "shared_attachment_links", "outbound_jobs", "routing_rules", "webhooks", "webhook_deliveries", "sessions", "audit_logs", "backup_settings", "backups", "app_settings", "license_settings", "email_templates", "calendar_events", "auto_reply_deliveries", "spam_token_stats", "spam_reputation", "spam_feedback", "mailbox_aliases", "password_reset_tokens", "mfa_recovery_codes", "login_challenges", "mailbox_agent_settings", "agent_conversations", "agent_chat_messages", "agent_jobs", "agent_draft_metadata", "agent_send_approvals", "mcp_key_mailboxes", 'ai_usage'];
 /**
@@ -15,7 +16,7 @@ const REQUIRED_BACKUP_TABLES: DatabaseBackupTable[] = ["users", "domains", "mail
  * `includedTables` lists a table it does not know and ignores extra `tables` entries, so a
  * Blue Pine backup still restores there, without the Blue Pine data.
  */
-const DOWNSTREAM_BACKUP_TABLES: DatabaseBackupTable[] = ["mail_app_passwords"];
+const DOWNSTREAM_BACKUP_TABLES: DatabaseBackupTable[] = ["mail_app_passwords", "imap_folders", "imap_message_uids"];
 const ALL_BACKUP_TABLES: DatabaseBackupTable[] = [...BACKUP_TABLES, ...DOWNSTREAM_BACKUP_TABLES];
 const INSERT_BATCH_SIZE = 50;
 
@@ -101,6 +102,8 @@ export async function restoreDatabaseRecords(db: D1Database, content: ArrayBuffe
 	}
 	// Downstream tables reference upstream ones, so they are cleared first and filled last.
 	const restoreTables = [...(sharedLinksTable ? BACKUP_TABLES : BACKUP_TABLES.filter((table) => table !== "shared_attachment_links")), ...downstreamTables];
+	// IMAP identity clients may already hold (src/lib/imap/restore.ts).
+	const imapState = await captureImapStateForRestore(db);
 	for (const table of [...restoreTables].reverse()) await db.prepare(`DELETE FROM ${table}`).run();
 	for (const table of restoreTables) {
 		const rows = document.tables[table] ?? [];
@@ -109,6 +112,7 @@ export async function restoreDatabaseRecords(db: D1Database, content: ArrayBuffe
 			if (statements.length > 0) await db.batch(statements);
 		}
 	}
+	await reconcileImapStateAfterRestore(db, imapState);
 }
 
 function parseDatabaseBackup(content: ArrayBuffer): DatabaseBackupDocument {
