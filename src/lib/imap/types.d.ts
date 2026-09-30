@@ -52,7 +52,7 @@ export type ImapMailbox = {
 	 * recoverable (not Trash or Drafts) while the bp0003 invariant is installed.
 	 */
 	permanentFlags: ImapFlagName[];
-	/** Write operations (expunge; later append, move, copy) need management access, as in the web app. */
+	/** Write operations (expunge, move; later append, copy) need management access, as in the web app. */
 	mayWrite: boolean;
 	mayRename: boolean;
 	mayDelete: boolean;
@@ -109,5 +109,20 @@ export type ImapFlagStore = { mode: "replace" | "add" | "remove"; flags: ImapFla
  * `forbidden`: the principal no longer has access at all (the session must end).
  * `denied`: access is intact but does not include this change (answer NO, keep the session).
  * `unsupported`: the change is not available on this server.
+ * `nonexistent`: the folder operated on (for the listener, the selected one) is gone.
+ * `nonexistent-destination`: a MOVE destination does not exist; the source is intact.
  */
-export type ImapStateErrorCode = "forbidden" | "denied" | "unsupported" | "nonexistent" | "unavailable";
+export type ImapStateErrorCode = "forbidden" | "denied" | "unsupported" | "nonexistent" | "nonexistent-destination" | "unavailable";
+
+/**
+ * What a MOVE into a folder does to a message: the product state it takes and the spam
+ * training the move stands for (the web app's "report spam" and "not spam"), if any.
+ */
+export type ImapMoveTarget = { status: string; folderId: string | null; training: "spam" | "ham" | null };
+
+export type ImapMoveResult = {
+	/** Source UIDs this MOVE relocated, ascending, with the message each named. */
+	moved: Array<{ uid: number; messageId: string }>;
+	/** The spam training the moved inbound messages call for (trainImapSpamFeedback), or null. */
+	training: "spam" | "ham" | null;
+};

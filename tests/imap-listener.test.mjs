@@ -300,7 +300,7 @@ test("gate7: an end-to-end session over TLS", async (t) => {
 	const { listener, good, bytes, database, row } = await populated(t);
 	const { client } = await connected(listener.port);
 	assert.deepEqual((await client.command("CAPABILITY")).untagged.map((unit) => unit.text), ["* CAPABILITY IMAP4rev1 SASL-IR AUTH=PLAIN ID"]);
-	assertTagged(await client.command(`AUTHENTICATE PLAIN ${Buffer.from(`\0a@example.test\0${good}`).toString("base64")}`), "OK", /\[CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE\]/);
+	assertTagged(await client.command(`AUTHENTICATE PLAIN ${Buffer.from(`\0a@example.test\0${good}`).toString("base64")}`), "OK", /\[CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE\]/);
 	const list = await client.command('LIST "" "*"');
 	assert.equal(list.untagged.length, 8, "six system folders, Work and the Unicode folder");
 	assert.equal(list.untagged.at(-1).text, '* LIST (\\Noinferiors) NIL "Caf&AOk-/&ANw-n&AO8-code"');
@@ -433,6 +433,77 @@ test("gate7: curl IMAPS interoperates", { skip: !tryCommand("curl") && "curl is 
 	assert.match((await curl("/Trash", ["--request", "SEARCH ALL"])).stdout, /^\* SEARCH 1\r?$/m, "the expunged message is in Trash, not deleted");
 	const refused = await curl("/Trash", ["--request", "STORE 1 +FLAGS (\\Deleted)"]);
 	assert.notEqual(refused.status, 0, "curl reports the refused \\Deleted in Trash");
+});
+
+test("a5.2b: Python imaplib MOVE and UID MOVE over TLS", { skip: !tryCommand("python3") && "python3 is not installed" }, async (t) => {
+	const { listener, good, bytes, row } = await populated(t);
+	const script = `
+import imaplib, ssl, sys, json
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+m = imaplib.IMAP4_SSL("127.0.0.1", int(sys.argv[1]), ssl_context=ctx)
+out = {"pre": list(m.capabilities)}
+m.login("a@example.test", sys.argv[2])
+out["post"] = m.capability()[1][0].decode().split()
+m.select("INBOX")
+typ, data = m._simple_command("MOVE", "1", "Archive")
+out["move"] = [typ, data[0].decode(), [x.decode() for x in m.response("EXPUNGE")[1] if x]]
+typ, data = m.uid("MOVE", "2", "Trash")
+out["uid_move"] = [typ, [x.decode() for x in m.response("EXPUNGE")[1] if x]]
+typ, data = m.select("INBOX")
+out["inbox"] = data[0].decode()
+m.select("Archive")
+typ, data = m.fetch("1", "(RFC822)")
+out["archived"] = data[0][1].hex()
+typ, data = m._simple_command("MOVE", "1", "Sent")
+out["refused"] = [typ, data[0].decode()]
+typ, data = m._simple_command("MOVE", "1", "Nowhere")
+out["missing"] = [typ, data[0].decode()]
+out["logout"] = m.logout()[0]
+print(json.dumps(out))
+`;
+	const result = await new Promise((resolve, reject) => {
+		const child = spawn("python3", ["-c", script, String(listener.port), good]);
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (chunk) => (stdout += chunk));
+		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.on("close", (code) => (code === 0 ? resolve(JSON.parse(stdout)) : reject(new Error(stderr))));
+	});
+	assert.ok(!result.pre.includes("MOVE"), "MOVE is not advertised before authentication");
+	assert.ok(result.post.includes("MOVE") && !result.post.includes("UIDPLUS"), result.post.join(" "));
+	assert.deepEqual(result.move, ["OK", "MOVE completed", ["1"]]);
+	assert.deepEqual(result.uid_move, ["OK", ["1"]]);
+	assert.equal(result.inbox, "0");
+	assert.equal(result.archived, Buffer.from(bytes).toString("hex"), "the moved message serves the exact octets");
+	assert.deepEqual(result.refused, ["NO", "[CANNOT] Messages cannot be moved into Sent"]);
+	assert.deepEqual(result.missing, ["NO", "[NONEXISTENT] No such mailbox"]);
+	assert.equal(result.logout, "BYE");
+	assert.equal(row("m-1").status, "archived");
+	assert.equal(row("m-2").status, "trash");
+});
+
+test("a5.2b: curl IMAPS MOVE and UID MOVE through custom requests", { skip: !tryCommand("curl") && "curl is not installed" }, async (t) => {
+	const { listener, good, row } = await populated(t);
+	const url = `imaps://127.0.0.1:${listener.port}`;
+	const curl = (path, extra = []) => run("curl", ["-sS", "--insecure", "--user", `a@example.test:${good}`, ...extra, `${url}${path}`]);
+	// curl prints only untagged responses named like the command, so the wire is read from its trace.
+	const moved = await curl("/INBOX", ["--verbose", "--request", "MOVE 1 Archive"]);
+	assert.equal(moved.status, 0, moved.stderr);
+	assert.match(moved.stderr, /^< \* 1 EXPUNGE\r?$/m);
+	assert.match(moved.stderr, /^< \S+ OK MOVE completed\r?$/m);
+	assert.doesNotMatch(moved.stderr, /COPYUID/);
+	const toCustom = await curl("/INBOX", ["--verbose", "--request", "UID MOVE 2 Work"]);
+	assert.equal(toCustom.status, 0, toCustom.stderr);
+	assert.match(toCustom.stderr, /^< \* 1 EXPUNGE\r?$/m);
+	assert.match(toCustom.stderr, /^< \S+ OK UID MOVE completed\r?$/m);
+	assert.match((await curl("/Archive", ["--request", "SEARCH ALL"])).stdout, /^\* SEARCH 1\r?$/m);
+	assert.match((await curl("/Work", ["--request", "SEARCH ALL"])).stdout, /^\* SEARCH 1\r?$/m);
+	const refused = await curl("/Archive", ["--request", "MOVE 1 Drafts"]);
+	assert.notEqual(refused.status, 0, "curl reports the refused MOVE into Drafts");
+	const missing = await curl("/Archive", ["--request", "MOVE 1 Nowhere"]);
+	assert.notEqual(missing.status, 0, "curl reports a MOVE to a mailbox that does not exist");
+	assert.equal(row("m-1").status, "archived");
+	assert.deepEqual([row("m-2").status, row("m-2").folder_id], ["received", "fld-work"]);
 });
 
 test("gate7: openssl s_client sees implicit TLS and the greeting", { skip: !tryCommand("openssl") && "openssl is not installed" }, async (t) => {

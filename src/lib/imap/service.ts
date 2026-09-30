@@ -20,9 +20,12 @@ import type {
 	ImapMailbox,
 	ImapMessageContent,
 	ImapMessageEntry,
+	ImapMoveResult,
+	ImapMoveTarget,
 	ImapPrincipal,
 } from "./types";
-import { chunk, customFolderKey, customFolderNames, FLAG_STORE_CHUNK, flagsFor, ImapStateError, isRecoverablyExpungeable, parseFolderKey, RELOCATION_CHUNK, STORABLE_FLAGS, SYSTEM_FOLDERS } from "./utils";
+import { recordSpamTraining } from "@/lib/spam/feedback";
+import { chunk, customFolderKey, customFolderNames, FLAG_STORE_CHUNK, flagsFor, ImapStateError, imapMoveTarget, isRecoverablyExpungeable, parseFolderKey, RELOCATION_CHUNK, STORABLE_FLAGS, SYSTEM_FOLDERS } from "./utils";
 
 /**
  * Protocol-neutral IMAP mailbox state for one authenticated principal (a verified mail
@@ -39,6 +42,8 @@ import { chunk, customFolderKey, customFolderNames, FLAG_STORE_CHUNK, flagsFor, 
  *   it, only in folders whose expunge is recoverable (not Trash or Drafts), and only while
  *   the bp0003 invariant is installed. Expunging moves \Deleted messages to Trash; nothing
  *   here deletes a message or a stored object.
+ * - MOVE (moveImapMessages) is the same relocation for any UIDs, under the special-folder
+ *   policy of imapMoveTarget; it too deletes nothing.
  *
  * Authorization is re-evaluated on every call, and folder keys are resolved within the
  * principal's own mailbox only.
@@ -462,7 +467,108 @@ export async function expungeImapFolder(env: CloudflareEnv, principal: ImapPrinc
 		const again = expungeRefusal(opened);
 		if (again) throw again;
 		const trash = await ensureFolderRow(opened.db, opened.access.mailboxId, "trash");
-		expunged.push(...(await relocateImapMessages(opened.db, opened.access.mailboxId, { folder, key: opened.mailbox.key }, { folder: trash, key: "trash" }, { status: "trash", folderId: null }, uidChunk)));
+		const { released } = await relocateImapMessages(opened.db, opened.access.mailboxId, { folder, key: opened.mailbox.key }, { folder: trash, key: "trash" }, { status: "trash", folderId: null }, uidChunk, { markedDeleted: true });
+		expunged.push(...released);
 	}
 	return expunged.sort((a, b) => a - b);
+}
+
+/**
+ * Why a MOVE may not run from an opened folder, or null when it may. Moving takes messages
+ * out of the source, so it needs what EXPUNGE needs: management access (`denied`) and the
+ * bp0003 invariant (`unsupported`), without which a destination UID could inherit a stale
+ * \Deleted mark.
+ */
+function moveRefusal(opened: Opened): ImapStateError | null {
+	if (!opened.access.canManage) return new ImapStateError("denied", "This access does not allow moving messages");
+	if (!opened.deletable) return new ImapStateError("unsupported", "MOVE is unavailable on this server right now");
+	return null;
+}
+
+type MoveChunk = { opened: Opened; destination: ImapMailbox; target: ImapMoveTarget };
+
+/** Authorize a MOVE chunk afresh: source access, destination, special-folder policy. */
+async function openMove(env: CloudflareEnv, principal: ImapPrincipal, key: ImapFolderKey, destinationKey: ImapFolderKey): Promise<MoveChunk> {
+	const opened = await open(env, principal, key);
+	const refusal = moveRefusal(opened);
+	if (refusal) throw refusal;
+	const destination = await resolveMailbox(opened.db, opened.access, destinationKey, opened.deletable);
+	if (!destination) throw new ImapStateError("nonexistent-destination", "No such destination mailbox");
+	const rule = imapMoveTarget(opened.mailbox.key, destination.key);
+	if ("refusal" in rule) throw new ImapStateError("unsupported", rule.refusal);
+	return { opened, destination, target: rule.target };
+}
+
+/**
+ * MOVE (RFC 6851, A5.2b): move the messages that `uids` name in folder `key` into the folder
+ * `destinationKey` of the same mailbox, and return the source UIDs that moved, ascending.
+ *
+ * - Refusals come first and move nothing: `denied` without management access, `unsupported`
+ *   without the bp0003 invariant or where imapMoveTarget refuses (Sent and Drafts as
+ *   destinations, Drafts anywhere but Trash, Sent to Spam, the same folder),
+ *   `nonexistent-destination` when the destination does not exist. A MOVE into Spam of
+ *   sent mail anywhere is `unsupported`, and a MOVE out of Drafts of a draft another user
+ *   owns is `denied` (only a draft's owner may discard it, as in the web app's Drafts).
+ * - Each chunk of UIDs is authorized and checked afresh and moved by one atomic
+ *   relocateImapMessages batch, so a message either moves entirely (its product state, a
+ *   fresh destination UID without \Deleted, the release of its source UID) or not at all.
+ *   A UID whose message moved or changed meanwhile, or a custom destination deleted
+ *   meanwhile, moves nothing. A later chunk may still be refused (or find access gone)
+ *   after earlier chunks moved; those stay moved.
+ * - Nothing else about a message changes: its row, bytes, size, date, read and starred
+ *   state and attachments stay. Spam training is not part of the move; the caller runs
+ *   trainImapSpamFeedback for `moved` afterwards when `training` says so.
+ */
+export async function moveImapMessages(env: CloudflareEnv, principal: ImapPrincipal, key: ImapFolderKey, uids: number[], destinationKey: ImapFolderKey): Promise<ImapMoveResult> {
+	const wanted = [...new Set(uids.filter((uid) => Number.isInteger(uid) && uid >= 1))].sort((a, b) => a - b);
+	const first = await openMove(env, principal, key, destinationKey);
+	const result: ImapMoveResult = { moved: [], training: first.target.training };
+	const folder = await findFolderRow(first.opened.db, first.opened.access.mailboxId, first.opened.mailbox.key);
+	if (!folder || !wanted.length) return result;
+	for (const [index, uidChunk] of chunk(wanted, RELOCATION_CHUNK).entries()) {
+		const { opened, destination, target } = index === 0 ? first : await openMove(env, principal, key, destinationKey);
+		const members = await opened.db
+			.select({ direction: messages.direction, userId: messages.userId })
+			.from(imapMessageUids)
+			.innerJoin(messages, eq(messages.id, imapMessageUids.messageId))
+			.where(and(eq(imapMessageUids.imapFolderId, folder.id), inArray(imapMessageUids.uid, uidChunk), membershipCondition(opened.access.mailboxId, opened.mailbox.key)));
+		if (destination.key === "junk" && members.some((member) => member.direction !== "inbound")) throw new ImapStateError("unsupported", "Sent mail cannot be moved to Spam");
+		if (opened.mailbox.key === "drafts" && members.some((member) => member.userId !== opened.access.userId)) throw new ImapStateError("denied", "Only the author of a draft may discard it");
+		const destinationFolder = await ensureFolderRow(opened.db, opened.access.mailboxId, destination.key);
+		const { moved } = await relocateImapMessages(opened.db, opened.access.mailboxId, { folder, key: opened.mailbox.key }, { folder: destinationFolder, key: destination.key }, target, uidChunk, {
+			inboundOnly: destination.key === "junk",
+			ownedBy: opened.mailbox.key === "drafts" ? opened.access.userId : undefined,
+		});
+		result.moved.push(...moved);
+	}
+	result.moved.sort((a, b) => a.uid - b.uid);
+	return result;
+}
+
+/**
+ * The spam training a committed MOVE stands for (moveImapMessages' `training`), for the
+ * messages it moved: `spam` for a move into Spam, `ham` for a move from Spam to INBOX, the
+ * web app's "report spam" and "not spam". Runs after the move, never inside it, so a failure
+ * or a crash here leaves the messages moved and at worst untrained.
+ *
+ * Authorization is re-evaluated (management access, as in the web app). A message is
+ * trained only while it is still inbound and still where the move put it, and only once:
+ * training already recorded for it with this classification is not repeated, so a retry,
+ * a repeated MOVE or a concurrent one counts once. Returns the messages that failed to
+ * train, with the error, so the caller can log them; the others are trained.
+ */
+export async function trainImapSpamFeedback(env: CloudflareEnv, principal: ImapPrincipal, messageIds: string[], classification: "spam" | "ham"): Promise<Array<{ messageId: string; error: unknown }>> {
+	const db = getDb(env);
+	const access = await authorizeImapAccess(db, principal);
+	if (!access) throw new ImapStateError("forbidden", "Mailbox access denied");
+	if (!access.canManage) return [];
+	const failed: Array<{ messageId: string; error: unknown }> = [];
+	for (const messageId of messageIds) {
+		try {
+			await recordSpamTraining(env, { messageId, mailboxId: access.mailboxId, actorUserId: access.userId, classification, status: classification === "spam" ? "spam" : "received" });
+		} catch (error) {
+			failed.push({ messageId, error });
+		}
+	}
+	return failed;
 }

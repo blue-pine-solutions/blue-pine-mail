@@ -3,7 +3,8 @@
  * src/lib/imap/ into a Worker, runs it in workerd (Miniflare) with real D1 and R2
  * bindings, and exercises migrations, concurrent first access and delivery, deletion,
  * canonical bytes, batched flag writes (A5.1), bp0003's \Deleted invariant, \Deleted and
- * recoverable EXPUNGE (A5.2a), the database guards, backup/restore and a restart.
+ * recoverable EXPUNGE (A5.2a), MOVE and its spam training (A5.2b), the database guards,
+ * backup/restore and a restart.
  *
  *   node scripts/imap-state-d1-check.mjs
  *
@@ -25,6 +26,9 @@ if (generated.status !== 0) throw new Error(`generate-migration-bundle failed: $
 
 const worker = `
 import * as imap from "./src/lib/imap/service.ts";
+import * as state from "./src/lib/imap/state.ts";
+import * as spam from "./src/lib/spam/feedback.ts";
+import { getDb } from "./src/db/index.ts";
 import { applyPendingMigrations } from "./src/lib/migrations/service.ts";
 import { exportDatabaseRecords, restoreDatabaseRecords } from "./src/lib/backups/export.ts";
 
@@ -55,6 +59,15 @@ export default {
 				const result = await imap.storeImapFlags(env, ...args);
 				return Response.json(Object.fromEntries(result));
 			}
+			if (op === "relocate") {
+				const [mailboxId, sourceKey, destinationKey, target, uids, guards] = args;
+				const db = getDb(env);
+				const source = await state.findFolderRow(db, mailboxId, sourceKey);
+				const destination = await state.ensureFolderRow(db, mailboxId, destinationKey);
+				return Response.json(await state.relocateImapMessages(db, mailboxId, { folder: source, key: sourceKey }, { folder: destination, key: destinationKey }, target, uids, guards));
+			}
+			if (op === "applySpamFeedback") return Response.json(await spam.applySpamFeedback(env, ...args));
+			if (op === "recordSpamTraining") return Response.json(await spam.recordSpamTraining(env, ...args));
 			if (op === "roundTrip") {
 				const document = await exportDatabaseRecords(env.DB);
 				await restoreDatabaseRecords(env.DB, document.buffer.slice(document.byteOffset, document.byteOffset + document.byteLength));
@@ -300,6 +313,103 @@ try {
 	const xState = (await sql(["SELECT m.status, u.deleted FROM messages m JOIN imap_message_uids u ON u.message_id = m.id JOIN imap_folders f ON f.id = u.imap_folder_id WHERE m.id = 'x-1' AND f.folder_key = 'inbox'"]))[0];
 	check("an exhausted Trash UIDNEXT rolls the whole relocation back on D1", typeof exhausted.error === "string" && /CHECK constraint failed/.test(exhausted.error) && xState.length === 1 && xState[0].status === "received" && xState[0].deleted === 1, [exhausted, xState]);
 
+	console.log("MOVE (A5.2b, D1)");
+	await sql(["INSERT INTO folders (id, user_id, mailbox_id, name, created_at) VALUES ('fld-m', 'user-a', 'mbx-a', 'Moved', 1)"]);
+	const moveRaw = "From: s@x\r\nSubject: move me\r\n\r\nbody ✓\r\n";
+	const moveBytes = new TextEncoder().encode(moveRaw);
+	await bucket.put("inbound/mv.eml", moveBytes);
+	const moveDigest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", moveBytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
+	await sql(["INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, status, raw_r2_key, read, starred, created_at) VALUES ('mv-1', 'user-a', 'mbx-a', 'inbound', 's@x', 'a@example.test', 'received', 'inbound/mv.eml', 1, 1, 9900), ('mv-2', 'user-a', 'mbx-a', 'inbound', 's@x', 'a@example.test', 'received', NULL, 0, 0, 9901)"]);
+	const mv1 = await op("ensureImapUid", owner, "inbox", "mv-1");
+	const mv2 = await op("ensureImapUid", owner, "inbox", "mv-2");
+	const mv1Before = await op("fetch", owner, "inbox", mv1);
+	await op("store", owner, "inbox", [mv2], { mode: "add", flags: ["deleted"] });
+	const archiveNext = (await op("openImapFolder", owner, "archive")).uidNext;
+	const moveResult = await op("moveImapMessages", owner, "inbox", [mv1, mv2], "archive");
+	check("MOVE relocates both, reports them in UID order, no training for Archive", same(moveResult, { moved: [{ uid: mv1, messageId: "mv-1" }, { uid: mv2, messageId: "mv-2" }], training: null }), moveResult);
+	const mvRows = (await sql(["SELECT id, status, folder_id, read, starred, created_at, raw_r2_key FROM messages WHERE id IN ('mv-1', 'mv-2') ORDER BY id"]))[0];
+	check("status archived; read, starred, date and object unchanged", mvRows.every((row) => row.status === "archived" && row.folder_id === null) && mvRows[0].read === 1 && mvRows[0].starred === 1 && mvRows[0].created_at === 9900 && mvRows[0].raw_r2_key === "inbound/mv.eml", mvRows);
+	const archiveAfter = await op("openImapFolder", owner, "archive");
+	const mvEntries = archiveAfter.messages.filter((entry) => entry.messageId.startsWith("mv-"));
+	check("fresh destination UIDs from UIDNEXT, UIDNEXT advanced", same(mvEntries.map((entry) => entry.uid), [archiveNext, archiveNext + 1]) && archiveAfter.uidNext === archiveNext + 2, [mvEntries, archiveAfter.uidNext]);
+	check("destination deleted = 0, also for the source UID that was \\Deleted", mvEntries.every((entry) => entry.flags.deleted === false));
+	check("source UIDs released", (await op("resolveImapUid", owner, "inbox", mv1)) === null && (await op("resolveImapUid", owner, "inbox", mv2)) === null);
+	const mvFetched = await op("fetch", owner, "archive", archiveNext);
+	check("canonical bytes and RFC822.SIZE unchanged after MOVE", mvFetched?.sha === moveDigest && mv1Before.sha === moveDigest && mvFetched.size === moveBytes.byteLength && mvFetched.source === "original", mvFetched);
+	check("a repeated MOVE of the released UIDs moves nothing", same(await op("moveImapMessages", owner, "inbox", [mv1, mv2], "archive"), { moved: [], training: null }));
+	check("same-folder MOVE is unsupported", (await op("moveImapMessages", owner, "archive", [archiveNext], "archive")).code === "unsupported");
+	check("Sent and Drafts are never destinations", (await op("moveImapMessages", owner, "archive", [archiveNext], "sent")).code === "unsupported" && (await op("moveImapMessages", owner, "archive", [archiveNext], "drafts")).code === "unsupported");
+	check("a nonexistent destination is nonexistent-destination", (await op("moveImapMessages", owner, "archive", [archiveNext], "f:nope")).code === "nonexistent-destination");
+	check("MOVE for a read-only delegate is denied", (await op("moveImapMessages", { userId: "user-b", mailboxId: "mbx-s" }, "inbox", [1], "trash")).code === "denied");
+
+	// UID relocation in chunks: 90 UIDs into a custom folder are two batches (80 + 10).
+	await sql(["WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 89) INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, status, created_at) SELECT printf('u-%02d', i), 'user-a', 'mbx-a', 'inbound', 's@x', 'a@example.test', 'received', 9950 FROM n"]);
+	const uInbox = await op("openImapFolder", owner, "inbox");
+	const uUids = uInbox.messages.filter((entry) => entry.messageId.startsWith("u-")).map((entry) => entry.uid);
+	const customNext = (await op("openImapFolder", owner, "f:fld-m")).uidNext;
+	const uMoved = await op("moveImapMessages", owner, "inbox", uUids, "f:fld-m");
+	const custom = await op("openImapFolder", owner, "f:fld-m");
+	check("MOVE of 90 UIDs (relocation batches of 80 and 10) into a custom folder on D1", uUids.length === 90 && same(uMoved.moved.map((entry) => entry.uid), uUids) && same(custom.messages.map((entry) => entry.uid), Array.from({ length: 90 }, (_, index) => customNext + index)) && custom.uidNext === customNext + 90, uMoved.error ?? [uMoved.moved?.length, custom.messages.length]);
+	check("custom folder rows: received with folder_id", (await sql(["SELECT COUNT(*) AS n FROM messages WHERE id LIKE 'u-%' AND status = 'received' AND folder_id = 'fld-m'"]))[0][0].n === 90);
+
+	// Concurrent MOVEs of the same UIDs to different folders: each message moves exactly once.
+	const racers = custom.messages.slice(0, 12).map((entry) => entry.uid);
+	const [toArchive, toInbox] = await Promise.all([op("moveImapMessages", owner, "f:fld-m", racers, "archive"), op("moveImapMessages", owner, "f:fld-m", racers, "inbox")]);
+	const winners = [...toArchive.moved, ...toInbox.moved].map((entry) => entry.uid).sort((a, b) => a - b);
+	const racedIds = custom.messages.slice(0, 12).map((entry) => entry.messageId);
+	const racedMappings = (await sql([`SELECT u.message_id, COUNT(*) AS n FROM imap_message_uids u JOIN imap_folders f ON f.id = u.imap_folder_id JOIN messages m ON m.id = u.message_id WHERE f.mailbox_id = 'mbx-a' AND u.message_id IN (${racedIds.map(() => "?").join(", ")}) AND ((f.folder_key = 'archive' AND m.status = 'archived') OR (f.folder_key = 'inbox' AND m.status = 'received' AND m.folder_id IS NULL)) GROUP BY u.message_id`, ...racedIds]))[0];
+	check("two concurrent MOVEs move each message exactly once, with one live UID", same(winners, racers) && racedMappings.length === 12 && racedMappings.every((row) => row.n === 1), [toArchive.moved?.length, toInbox.moved?.length, racedMappings.length]);
+
+	// Stale source: moved elsewhere first, the MOVE changes nothing and releases the UID.
+	const staleUid = custom.messages[20].uid;
+	await sql(["UPDATE messages SET status = 'spam', folder_id = NULL WHERE id = ?", custom.messages[20].messageId]);
+	const staleMove = await op("moveImapMessages", owner, "f:fld-m", [staleUid], "trash");
+	check("a stale source UID moves nothing", same(staleMove.moved, []) && (await sql(["SELECT status FROM messages WHERE id = ?", custom.messages[20].messageId]))[0][0].status === "spam", staleMove);
+
+	// A vanished custom destination: the relocation's own guard keeps the message in place.
+	const guardUid = custom.messages[21].uid;
+	const guarded = await op("relocate", "mbx-a", "f:fld-m", "f:fld-gone", { status: "received", folderId: "fld-gone" }, [guardUid], {});
+	check("a relocation into a custom folder that does not exist moves nothing", same(guarded.moved, []) && (await sql(["SELECT folder_id FROM messages WHERE id = ?", custom.messages[21].messageId]))[0][0].folder_id === "fld-m", guarded);
+
+	// Exhausted destination UIDNEXT: the whole chunk rolls back.
+	const exhaustUids = custom.messages.slice(22, 30).map((entry) => entry.uid);
+	const beforeExhaust = await sql(["SELECT id, status, folder_id FROM messages WHERE folder_id = 'fld-m' ORDER BY id"], ["SELECT u.uid, u.message_id FROM imap_message_uids u JOIN imap_folders f ON f.id = u.imap_folder_id WHERE f.folder_key = 'f:fld-m' ORDER BY u.uid"]);
+	await op("openImapFolder", owner, "junk");
+	await sql(["UPDATE imap_folders SET uid_next = 4294967296 WHERE mailbox_id = 'mbx-a' AND folder_key = 'junk'"]);
+	const exhaustedMove = await op("moveImapMessages", owner, "f:fld-m", exhaustUids, "junk");
+	const afterExhaust = await sql(["SELECT id, status, folder_id FROM messages WHERE folder_id = 'fld-m' ORDER BY id"], ["SELECT u.uid, u.message_id FROM imap_message_uids u JOIN imap_folders f ON f.id = u.imap_folder_id WHERE f.folder_key = 'f:fld-m' ORDER BY u.uid"]);
+	check("an exhausted destination UIDNEXT rolls the whole MOVE chunk back on D1", /CHECK constraint failed/.test(exhaustedMove.error ?? "") && same(beforeExhaust, afterExhaust), exhaustedMove);
+	check("no spam training for a MOVE that did not commit", (await sql(["SELECT COUNT(*) AS n FROM spam_feedback"]))[0][0].n === 0);
+
+	console.log("Spam training after MOVE (A5.2b, D1)");
+	await sql(["INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, subject, text_body, status, created_at) VALUES ('sp-1', 'user-a', 'mbx-a', 'inbound', 'promo@spammy.test', 'a@example.test', 'Cheap pills', 'Buy cheap pills now http://spammy.test/offer', 'received', 9990), ('sp-2', 'user-a', 'mbx-s', 'inbound', 'promo@spammy.test', 'sales@example.test', 'Cheap pills', 'Buy cheap pills now http://spammy.test/offer', 'received', 9990)"]);
+	// mbx-a's Spam UIDNEXT is exhausted by the rollback check above, so MOVE-then-train runs in mbx-s.
+	const shared = { userId: "user-a", mailboxId: "mbx-s" };
+	const spShared = await op("ensureImapUid", shared, "inbox", "sp-2");
+	await sql(["INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, status, created_at) VALUES ('sp-out-s', 'user-a', 'mbx-s', 'outbound', 'sales@example.test', 'b@x', 'received', 9992)"]);
+	const outShared = await op("ensureImapUid", shared, "inbox", "sp-out-s");
+	check("outbound mail cannot MOVE to Spam", (await op("moveImapMessages", shared, "inbox", [outShared], "junk")).code === "unsupported");
+	const spamMove = await op("moveImapMessages", shared, "inbox", [spShared], "junk");
+	check("MOVE into Spam reports spam training", same(spamMove, { moved: [{ uid: spShared, messageId: "sp-2" }], training: "spam" }), spamMove);
+	check("training after the committed MOVE succeeds on D1", same(await op("trainImapSpamFeedback", shared, ["sp-2"], "spam"), []));
+	const spTotals = async (mailboxId) => (await sql(["SELECT COALESCE(SUM(spam_count), 0) AS spam, COALESCE(SUM(ham_count), 0) AS ham FROM spam_token_stats WHERE mailbox_id = ?", mailboxId]))[0][0];
+	const trained = await spTotals("mbx-s");
+	check("spam_feedback and token counts recorded", (await sql(["SELECT classification FROM spam_feedback WHERE message_id = 'sp-2'"]))[0][0]?.classification === "spam" && trained.spam > 0 && trained.ham === 0, trained);
+	await op("trainImapSpamFeedback", shared, ["sp-2"], "spam");
+	const racedTraining = await Promise.all([op("recordSpamTraining", { messageId: "sp-2", mailboxId: "mbx-s", actorUserId: "user-a", classification: "spam", status: "spam" }), op("recordSpamTraining", { messageId: "sp-2", mailboxId: "mbx-s", actorUserId: "user-a", classification: "spam", status: "spam" })]);
+	check("retries of a recorded training count nothing more", same(await spTotals("mbx-s"), trained) && racedTraining.every((value) => value === false), racedTraining);
+	await sql(["INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, subject, text_body, status, created_at) VALUES ('sp-3', 'user-a', 'mbx-s', 'inbound', 'promo@spammy.test', 'sales@example.test', 'Cheap pills', 'Buy cheap pills now http://spammy.test/offer', 'spam', 9993)"]);
+	const freshRace = await Promise.all(Array.from({ length: 4 }, () => op("recordSpamTraining", { messageId: "sp-3", mailboxId: "mbx-s", actorUserId: "user-a", classification: "spam", status: "spam" })));
+	check("four concurrent trainings of an untrained message count exactly once (guarded upserts on D1)", freshRace.filter((value) => value === true).length === 1 && (await spTotals("mbx-s")).spam === trained.spam * 2, [freshRace, await spTotals("mbx-s")]);
+	const junkUid = (await op("openImapFolder", shared, "junk")).messages.find((entry) => entry.messageId === "sp-2").uid;
+	const hamMove = await op("moveImapMessages", shared, "junk", [junkUid], "inbox");
+	check("Spam -> INBOX reports ham training", hamMove.training === "ham" && hamMove.moved.length === 1, hamMove);
+	await op("trainImapSpamFeedback", shared, ["sp-2"], "ham");
+	const hammed = await spTotals("mbx-s");
+	check("ham training reverses the spam counts on D1", hammed.spam === trained.spam && hammed.ham === trained.spam && (await sql(["SELECT classification FROM spam_feedback WHERE message_id = 'sp-2'"]))[0][0].classification === "ham", hammed);
+	check("the web app's report-spam still moves and trains on D1", (await op("applySpamFeedback", { id: "user-a", role: "admin" }, "sp-1", "spam")) === true && (await sql(["SELECT status FROM messages WHERE id = 'sp-1'"]))[0][0].status === "spam" && (await spTotals("mbx-a")).spam === trained.spam);
+	check("the web app's not-spam still moves and trains ham on D1", (await op("applySpamFeedback", { id: "user-a", role: "admin" }, "sp-1", "ham")) === true && (await sql(["SELECT status FROM messages WHERE id = 'sp-1'"]))[0][0].status === "received" && same(await spTotals("mbx-a"), { spam: 0, ham: trained.spam }));
+
 	console.log("Fail-closed without bp0003 (D1)");
 	const triggerSql = onMessages[0].sql;
 	await sql(["DROP TRIGGER bp_imap_membership_clears_deleted"]);
@@ -307,6 +417,9 @@ try {
 	check("STORE \\Deleted is unsupported", (await op("store", owner, "inbox", [xUid], { mode: "remove", flags: ["deleted"] })).code === "unsupported");
 	check("EXPUNGE is unsupported and moves nothing", (await op("expungeImapFolder", owner, "inbox", xUid)).code === "unsupported" && (await sql(["SELECT status FROM messages WHERE id = 'x-1'"]))[0][0].status === "received");
 	check("\\Seen still works", (await op("store", owner, "inbox", [xUid], { mode: "add", flags: ["seen"] }))[xUid]?.seen === true);
+	check("MOVE is unsupported and moves nothing", (await op("moveImapMessages", owner, "inbox", [xUid], "archive")).code === "unsupported" && (await sql(["SELECT status FROM messages WHERE id = 'x-1'"]))[0][0].status === "received");
+	const unguarded = await op("relocate", "mbx-a", "inbox", "archive", { status: "archived", folderId: null }, [xUid], {});
+	check("a relocation without the trigger moves nothing (its own guard)", same(unguarded.moved, []) && (await sql(["SELECT status FROM messages WHERE id = 'x-1'"]))[0][0].status === "received", unguarded);
 	await sql([triggerSql]);
 	check("the trigger is restored", (await op("listImapMailboxes", owner)).some((mailbox) => mailbox.permanentFlags.includes("deleted")));
 

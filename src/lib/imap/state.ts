@@ -182,17 +182,29 @@ async function batchSql(db: AppDatabase, statements: SQL[]) {
 	);
 }
 
+export type ImapRelocationGuards = {
+	/** Only messages whose source UID is still marked \Deleted move (recoverable EXPUNGE). */
+	markedDeleted?: boolean;
+	/** Only inbound messages move (a MOVE into Spam). */
+	inboundOnly?: boolean;
+	/** Only messages this user owns move (a MOVE out of Drafts). */
+	ownedBy?: string;
+};
+
 /**
- * Move the messages that `uids` name in `source` into `destination` as one atomic batch, and
- * return the source UIDs this released. Only messages whose source UID is still marked
- * \Deleted at that moment move (A5.2a's recoverable EXPUNGE; MOVE will relax this), and
- * only while the bp0003 invariant is installed. Every statement guards itself on current
- * state, so a stale or repeated request, or one racing any other move, changes nothing it
- * should not:
+ * Move the messages that `uids` name in `source` into `destination` as one atomic batch.
+ * Returns the source UIDs this released (their message is no longer in the source, moved by
+ * this batch or by anything else before it) and, of those, the ones this batch moved, with
+ * their message. A5.2a's recoverable EXPUNGE moves only UIDs still marked \Deleted
+ * (`markedDeleted`); A5.2b's MOVE moves any UID it names, subject to its own guards. Either
+ * way it happens only while the bp0003 invariant is installed. Every statement guards itself
+ * on current state, so a stale or repeated request, or one racing any other move, changes
+ * nothing it should not:
  *
  * 1. The product move: `messages` rows still in the source folder, named by a source UID
- *    still marked \Deleted, get the destination's status and folder. bp0003 clears their
- *    \Deleted marks as part of this statement.
+ *    (still marked \Deleted, still inbound, still owned, as `guards` ask), get the
+ *    destination's status and folder, provided a destination custom folder still exists.
+ *    bp0003 clears every \Deleted mark of these messages as part of this statement.
  * 2. Destination UIDs, in source UID order, for every message named by these source UIDs
  *    that is now in the destination and not the source and holds no destination UID yet.
  *    The rows have `deleted` = 0 (the default), carry the source UID's recorded canonical
@@ -211,25 +223,32 @@ export async function relocateImapMessages(
 	destination: ImapRelocationEnd,
 	target: { status: string; folderId: string | null },
 	uids: number[],
-): Promise<number[]> {
-	if (!uids.length) return [];
+	guards: ImapRelocationGuards = {},
+): Promise<{ released: number[]; moved: Array<{ uid: number; messageId: string }> }> {
+	if (!uids.length) return { released: [], moved: [] };
 	if (uids.length > IN_LIST_CHUNK) throw new Error("Too many UIDs for one relocation");
 	const inSource = membershipCondition(mailboxId, source.key);
 	const inDestination = membershipCondition(mailboxId, destination.key);
 	const uidList = sql.join(uids.map((uid) => sql`${uid}`), sql`, `);
 	const folderGuard = target.folderId === null ? sql`1` : sql`EXISTS (SELECT 1 FROM folders WHERE folders.id = ${target.folderId} AND folders.mailbox_id = ${mailboxId})`;
+	const markGuard = guards.markedDeleted ? sql`AND deleted = 1` : sql``;
+	const inboundGuard = guards.inboundOnly ? sql`AND messages.direction = 'inbound'` : sql``;
+	const ownerGuard = guards.ownedBy !== undefined ? sql`AND messages.user_id = ${guards.ownedBy}` : sql``;
 	const now = nowSeconds();
 	const left = sql`
 		EXISTS (SELECT 1 FROM messages WHERE messages.id = s.message_id AND ${inDestination})
 		AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = s.message_id AND ${inSource})
 	`;
-	const [, , released] = await batchSql(db, [
+	const [updated, , released] = await batchSql(db, [
 		sql`
 			UPDATE messages SET status = ${target.status}, folder_id = ${target.folderId}
 			WHERE ${inSource}
-				AND messages.id IN (SELECT message_id FROM imap_message_uids WHERE imap_folder_id = ${source.folder.id} AND uid IN (${uidList}) AND deleted = 1)
+				AND messages.id IN (SELECT message_id FROM imap_message_uids WHERE imap_folder_id = ${source.folder.id} AND uid IN (${uidList}) ${markGuard})
+				${inboundGuard}
+				${ownerGuard}
 				AND ${folderGuard}
 				AND ${deletedInvariantInstalled}
+			RETURNING id
 		`,
 		sql`
 			INSERT INTO imap_message_uids (imap_folder_id, uid, message_id, rfc822_key, rfc822_size, created_at)
@@ -244,8 +263,10 @@ export async function relocateImapMessages(
 			DELETE FROM imap_message_uids
 			WHERE imap_folder_id = ${source.folder.id} AND uid IN (${uidList})
 				AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = imap_message_uids.message_id AND ${inSource})
-			RETURNING uid
+			RETURNING uid, message_id
 		`,
 	]);
-	return (released.results as Array<{ uid: number }>).map((row) => Number(row.uid)).sort((a, b) => a - b);
+	const movedIds = new Set((updated.results as Array<{ id: string }>).map((row) => String(row.id)));
+	const releasedRows = (released.results as Array<{ uid: number; message_id: string }>).map((row) => ({ uid: Number(row.uid), messageId: String(row.message_id) })).sort((a, b) => a.uid - b.uid);
+	return { released: releasedRows.map((row) => row.uid), moved: releasedRows.filter((row) => movedIds.has(row.messageId)) };
 }

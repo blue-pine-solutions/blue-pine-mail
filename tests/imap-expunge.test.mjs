@@ -189,7 +189,7 @@ test("a5.2a: PERMANENTFLAGS include \\Deleted for a manager outside Trash and Dr
 	const reader = await connect(context, SHARED);
 	assert.equal(permanent(await reader.client.command("SELECT INBOX")), "* OK [PERMANENTFLAGS (\\Seen \\Flagged)] Flags permitted");
 	const capability = texts(await context.client.command("CAPABILITY"))[0];
-	assert.equal(capability, "* CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE", "no MOVE, UIDPLUS or anything else is advertised");
+	assert.equal(capability, "* CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE", "MOVE (A5.2b) and nothing else new: no UIDPLUS");
 });
 
 test("a5.2a: STORE \\Deleted with +FLAGS, -FLAGS, FLAGS and .SILENT; it persists across reconnects and is seen by a second session", async (t) => {

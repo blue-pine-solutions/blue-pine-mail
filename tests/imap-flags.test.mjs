@@ -71,7 +71,7 @@ test("a5.1: SELECT is READ-WRITE with PERMANENTFLAGS (\\Seen \\Flagged); EXAMINE
 	assert.ok(texts(examine).includes("* OK [PERMANENTFLAGS ()] Read-only mailbox"));
 	const capability = texts(await context.client.command("CAPABILITY"))[0];
 	assert.equal(capability, `* CAPABILITY ${app.AUTH_CAPABILITIES}`);
-	assert.equal(app.AUTH_CAPABILITIES, "IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE", "no A5.2+ capability (MOVE, UIDPLUS, IDLE, ...) is advertised");
+	assert.equal(app.AUTH_CAPABILITIES, "IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE", "only MOVE (A5.2b) is added; no UIDPLUS, IDLE, ...");
 	for (const folder of ["Drafts", "Sent", "Archive", "Spam", "Trash", "Work"]) assertTagged(await context.client.command(`SELECT ${folder}`), "OK", /\[READ-WRITE\]/);
 });
 

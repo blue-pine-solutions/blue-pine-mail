@@ -1,4 +1,4 @@
-import type { ImapFlagName, ImapFlags, ImapFolderKey, ImapSpecialUse, ImapStateErrorCode, ImapSystemRole } from "./types";
+import type { ImapFlagName, ImapFlags, ImapFolderKey, ImapMoveTarget, ImapSpecialUse, ImapStateErrorCode, ImapSystemRole } from "./types";
 
 /**
  * The product folders IMAP exposes, in listing order, and the `messages.status` each
@@ -27,7 +27,7 @@ export const FLAG_STORE_CHUNK = 80;
 /** Flags a STORE may name and this server keeps. Which of them a principal may change where is ImapMailbox.permanentFlags. */
 export const STORABLE_FLAGS: readonly ImapFlagName[] = ["seen", "flagged", "deleted"];
 
-/** UIDs per relocation batch (expungeImapFolder), leaving room under IN_LIST_CHUNK for the other parameters. */
+/** UIDs per relocation batch (expungeImapFolder, moveImapMessages), leaving room under IN_LIST_CHUNK for the other parameters. */
 export const RELOCATION_CHUNK = 80;
 
 /**
@@ -43,6 +43,34 @@ export const DELETED_INVARIANT_TRIGGER = "bp_imap_membership_clears_deleted";
  */
 export function isRecoverablyExpungeable(key: ImapFolderKey): boolean {
 	return key !== "trash" && key !== "drafts";
+}
+
+/**
+ * The special-folder policy of IMAP MOVE (A5.2b): what moving a message from `source` to
+ * `destination` makes of it, or why the move is refused. It follows the web app's moves:
+ *
+ * - INBOX is `received` without a folder, a custom folder `received` in that folder, Archive
+ *   `archived`, Spam `spam` and Trash `trash`, from any folder that may move there.
+ * - Sent and Drafts are never destinations: sending and composing are not moves, and a
+ *   message in Trash does not remember that it came from Sent, so nothing can be put back
+ *   there.
+ * - Drafts may only move to Trash (the web app's "discard"; the caller also requires the
+ *   principal to own each draft). Sent mail cannot move to Spam.
+ * - A move into the folder a message is already in is refused: it would change nothing.
+ * - Moving into Spam is the web app's "report spam", and moving from Spam to INBOX its
+ *   "not spam": both train the mailbox's filter (inbound mail only). Other moves out of Spam
+ *   (to Archive, Trash or a custom folder) do not, as in the web app.
+ */
+export function imapMoveTarget(source: ImapFolderKey, destination: ImapFolderKey): { target: ImapMoveTarget } | { refusal: string } {
+	const to = parseFolderKey(destination);
+	if (!to || !parseFolderKey(source)) return { refusal: "Unknown folder" };
+	if (source === destination) return { refusal: "Messages are already in that mailbox" };
+	if (to.kind === "role" && (to.role === "sent" || to.role === "drafts")) return { refusal: `Messages cannot be moved into ${to.role === "sent" ? "Sent" : "Drafts"}` };
+	if (source === "drafts" && destination !== "trash") return { refusal: "Drafts can only be moved to Trash" };
+	if (source === "sent" && destination === "junk") return { refusal: "Sent mail cannot be moved to Spam" };
+	if (to.kind === "folder") return { target: { status: "received", folderId: to.folderId, training: null } };
+	const training = destination === "junk" ? "spam" : source === "junk" && destination === "inbox" ? "ham" : null;
+	return { target: { status: to.status, folderId: null, training } };
 }
 
 export class ImapStateError extends Error {

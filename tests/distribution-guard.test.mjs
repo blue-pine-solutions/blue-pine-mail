@@ -221,8 +221,15 @@ test("the IMAP state layer, flag writes included, stays Workers/D1-safe", () => 
 		assert.doesNotMatch(read(file), /from\s+["'](?:@\/lib\/imap-server|[^"']*server\/runtime\/)/, `${file} must not import the listener or the Node runtime`);
 	}
 	// Writes happen only through storeImapFlags, which only the listener calls; no Worker route does.
-	const callers = [...sourceFiles("src"), "worker.ts", "worker-utils.ts"].filter((file) => /\bstoreImapFlags\(/.test(read(file)) && dirname(file) !== join("src", "lib", "imap"));
-	assert.deepEqual(callers, [join("src", "lib", "imap-server", "session.ts")]);
+	// So do MOVE (A5.2b), recoverable EXPUNGE (A5.2a) and the post-MOVE spam training.
+	for (const writer of ["storeImapFlags", "expungeImapFolder", "moveImapMessages", "trainImapSpamFeedback"]) {
+		const callers = [...sourceFiles("src"), "worker.ts", "worker-utils.ts"].filter((file) => new RegExp(`\\b${writer}\\(`).test(read(file)) && dirname(file) !== join("src", "lib", "imap"));
+		assert.deepEqual(callers, [join("src", "lib", "imap-server", "session.ts")], writer);
+	}
+	// MOVE advertises no UIDPLUS, so it never sends COPYUID.
+	const session = read(join("src", "lib", "imap-server", "session.ts"));
+	assert.doesNotMatch(session, /\[COPYUID/);
+	assert.doesNotMatch(session.match(/export const AUTH_CAPABILITIES = "([^"]*)"/)[1], /UIDPLUS/);
 });
 
 const workersBuild = join(root, "dist", "server");

@@ -55,9 +55,9 @@ test("gate2: LOGIN with a mail app password; capabilities change after authentic
 	const context = await ready(t);
 	const { credential } = await context.credential("user-a", "mbx-a");
 	const result = await context.client.login("A@Example.TEST ", credential);
-	assertTagged(result, "OK", /^t\d+ OK \[CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE\] Logged in/);
+	assertTagged(result, "OK", /^t\d+ OK \[CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE\] Logged in/);
 	const after = await context.client.command("CAPABILITY");
-	assert.equal(after.untagged[0].text, "* CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE");
+	assert.equal(after.untagged[0].text, "* CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE");
 	assertTagged(await context.client.login("a@example.test", credential), "BAD", /not valid/);
 	assert.deepEqual(context.client.logs.find((event) => event.event === "auth.success"), { event: "auth.success", userId: "user-a", mailboxId: "mbx-a", appPasswordId: "map-1" });
 	// Literal username/password (synchronizing literals) work too.
@@ -342,7 +342,7 @@ test("gate3: a UIDVALIDITY change or a vanished selected folder ends the session
 	assert.equal(gone.untagged.at(-1).text, "* BYE Selected mailbox no longer exists");
 });
 
-test("gate3: every mutating command other than STORE, EXPUNGE and CLOSE is refused without touching A3 or product state", async (t) => {
+test("gate3: every mutating command other than STORE, EXPUNGE, CLOSE and MOVE is refused without touching A3 or product state", async (t) => {
 	const context = await loggedIn(t);
 	await context.deliver("m-1", "Subject: x\r\n\r\nx\r\n");
 	await context.client.command("SELECT INBOX");
@@ -353,7 +353,7 @@ test("gate3: every mutating command other than STORE, EXPUNGE and CLOSE is refus
 		context.database.db.prepare("SELECT id, name FROM folders ORDER BY id").all(),
 	]);
 	const before = state();
-	// STORE is certified in imap-flags.test.mjs, EXPUNGE and CLOSE in imap-expunge.test.mjs.
+	// STORE is certified in imap-flags.test.mjs, EXPUNGE and CLOSE in imap-expunge.test.mjs, MOVE in imap-move.test.mjs.
 	for (const command of ["COPY 1 Trash", "UID COPY 1 Trash", 'CREATE "New"', "DELETE Work", "RENAME Work Play", "SUBSCRIBE Work", "UNSUBSCRIBE Work"]) {
 		assertTagged(await context.client.command(command), "NO", /\[CANNOT\] .* not available on this server/);
 	}
@@ -363,7 +363,7 @@ test("gate3: every mutating command other than STORE, EXPUNGE and CLOSE is refus
 	assertTagged(await context.client.collect("ap"), "NO", /CANNOT/);
 	context.client.write("big APPEND INBOX {70000}\r\n");
 	assertTagged(await context.client.collect("big"), "BAD", /Literal too large/);
-	for (const command of ["MOVE 1 Trash", "UID MOVE 1 Trash", "UID EXPUNGE 1", "IDLE", "ENABLE CONDSTORE", "COMPRESS DEFLATE", "GETQUOTAROOT INBOX", "XLIST \"\" *"]) {
+	for (const command of ["UID EXPUNGE 1", "IDLE", "ENABLE CONDSTORE", "COMPRESS DEFLATE", "GETQUOTAROOT INBOX", "XLIST \"\" *"]) {
 		assertTagged(await context.client.command(command), "BAD", /Unknown command/);
 	}
 	assertTagged(await context.client.command("NOOP"), "OK");

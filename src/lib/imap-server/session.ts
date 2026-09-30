@@ -1,7 +1,7 @@
 import { getDb } from "@/db";
 import { authorizeImapAccess } from "@/lib/imap/access";
-import { expungeImapFolder, fetchImapMessage, getImapFolderStatus, listImapMailboxes, openImapFolder, storeImapFlags } from "@/lib/imap/service";
-import type { ImapFlagName, ImapFlags, ImapFolderSnapshot, ImapMailbox } from "@/lib/imap/types";
+import { expungeImapFolder, fetchImapMessage, getImapFolderStatus, listImapMailboxes, moveImapMessages, openImapFolder, storeImapFlags, trainImapSpamFeedback } from "@/lib/imap/service";
+import type { ImapFlagName, ImapFlags, ImapFolderSnapshot, ImapMailbox, ImapMoveResult } from "@/lib/imap/types";
 import { ImapStateError, STORABLE_FLAGS } from "@/lib/imap/utils";
 import { verifyMailAppPassword } from "@/lib/mail-app-passwords/verify";
 import { binaryToUtf8 } from "./bytes-utils";
@@ -37,15 +37,18 @@ import type { FetchItem, FramedItem, FramerLimits, ImapSessionHost, SelectedMail
  * - \Deleted, through the same STORE, where A3 lists it among the permanent flags
  *   (management access, not Trash or Drafts, bp0003 installed);
  * - recoverable EXPUNGE and CLOSE (A5.2a): A3's expungeImapFolder moves \Deleted messages to
- *   Trash. Nothing is ever deleted permanently.
- * Every other command that would write (COPY, APPEND, MOVE, UID EXPUNGE, folder management)
- * is refused before any storage call.
+ *   Trash;
+ * - MOVE and UID MOVE (A5.2b, RFC 6851): A3's moveImapMessages, under its special-folder
+ *   policy, then the spam training a move into or out of Spam stands for.
+ * Nothing is ever deleted permanently. Every other command that would write (COPY, APPEND,
+ * UID EXPUNGE, folder management) is refused before any storage call; UIDPLUS is not
+ * offered, so MOVE sends no COPYUID.
  */
 
 /** Capabilities before authentication. Each is implemented and tested (tests/imap-listener.test.mjs). */
 export const PREAUTH_CAPABILITIES = "IMAP4rev1 SASL-IR AUTH=PLAIN ID";
 /** Capabilities once authenticated. */
-export const AUTH_CAPABILITIES = "IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE";
+export const AUTH_CAPABILITIES = "IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE";
 
 export const MAX_QUEUED_COMMANDS = 16;
 export const MAX_LINE = 64 * 1024;
@@ -247,7 +250,7 @@ export class ImapSession {
 		} else if (error instanceof ImapStateError && error.code === "forbidden") {
 			this.host.log({ event: "access.revoked" });
 			await this.end("Access revoked");
-		} else if (error instanceof ImapStateError && error.code === "nonexistent") {
+		} else if (error instanceof ImapStateError && (error.code === "nonexistent" || error.code === "nonexistent-destination")) {
 			await this.send(`${tag} NO [NONEXISTENT] No such mailbox`);
 		} else if (error instanceof ImapStateError && error.code === "denied") {
 			// A permission this access lacks; the access itself is intact, so the session goes on.
@@ -339,12 +342,15 @@ export class ImapSession {
 			case "STORE":
 			case "UID STORE":
 				return this.store(tag, reader, command === "UID STORE");
+			case "MOVE":
+			case "UID MOVE":
+				return this.move(tag, reader, command === "UID MOVE");
 		}
 		return this.send(`${tag} BAD Unknown command`);
 	}
 
 	private isKnown(command: string): boolean {
-		return ["LIST", "LSUB", "STATUS", "SELECT", "EXAMINE", "NAMESPACE", "CHECK", "CLOSE", "UNSELECT", "FETCH", "UID FETCH", "SEARCH", "UID SEARCH", "LOGIN", "AUTHENTICATE", "STORE", "UID STORE", "COPY", "UID COPY", "EXPUNGE", ...UNSUPPORTED_COMMANDS].includes(command);
+		return ["LIST", "LSUB", "STATUS", "SELECT", "EXAMINE", "NAMESPACE", "CHECK", "CLOSE", "UNSELECT", "FETCH", "UID FETCH", "SEARCH", "UID SEARCH", "LOGIN", "AUTHENTICATE", "STORE", "UID STORE", "COPY", "UID COPY", "MOVE", "UID MOVE", "EXPUNGE", ...UNSUPPORTED_COMMANDS].includes(command);
 	}
 
 	// ---- any state --------------------------------------------------------------
@@ -798,6 +804,64 @@ export class ImapSession {
 		this.selected = null;
 		this.state = "authenticated";
 		await this.send(`${tag} OK CLOSE completed`);
+	}
+
+	/**
+	 * MOVE and UID MOVE (RFC 6851), A5.2b. The view is refreshed without EXPUNGE first, so the
+	 * set is resolved against exactly the sequence numbers (or UIDs) the client knows; A3 then
+	 * moves those messages under its authorization and special-folder policy, one atomic batch
+	 * per chunk, and the view is refreshed with EXPUNGE, which reports every message that left
+	 * (by this MOVE or otherwise) in the client's sequence space, highest number first, before
+	 * the tagged answer. No COPYUID: UIDPLUS is not offered.
+	 *
+	 * A refusal moves nothing: NOPERM without management access (or for another user's
+	 * draft), CANNOT for a destination the policy refuses, NONEXISTENT for an unknown one. A
+	 * message that vanished before it could move makes the answer NO, after whatever did
+	 * move is reported. Spam training runs only after the move committed; its failure is
+	 * logged and does not change the answer.
+	 */
+	private async move(tag: string, reader: CommandReader, uidMode: boolean): Promise<void> {
+		reader.sp();
+		const token = reader.token();
+		if (!isSequenceSetToken(token)) throw new ImapSyntaxError("Invalid sequence set");
+		const set = parseSequenceSet(token);
+		reader.sp();
+		const requested = reader.astring();
+		reader.end();
+		const selected = this.selected!;
+		if (selected.readOnly) return this.send(`${tag} NO Mailbox is read-only`);
+		await this.refresh(false);
+		const targets = this.targets(set, uidMode);
+		if (!targets) return this.send(`${tag} BAD Invalid message sequence number`);
+		const destination = findMailbox(await this.mailboxes(), requested);
+		if (!destination) return this.send(`${tag} NO [NONEXISTENT] No such mailbox`);
+		const live = targets.filter((target) => !selected.vanished.has(target.uid));
+		let result: ImapMoveResult;
+		try {
+			result = await this.selectedCall(() => moveImapMessages(this.env, this.principal!, selected.key, live.map((target) => target.uid), destination.key));
+		} catch (error) {
+			// Report whatever earlier chunks moved before answering; a lost session is simply ended.
+			if (!(error instanceof SessionEnd || (error instanceof ImapStateError && error.code === "forbidden"))) await this.refresh(true).catch(() => undefined);
+			throw error;
+		}
+		if (result.training && result.moved.length) await this.train(result.moved.map((entry) => entry.messageId), result.training);
+		await this.refresh(true);
+		if (result.moved.length < targets.length) {
+			const stillHere = live.some((target) => !result.moved.some((entry) => entry.uid === target.uid) && selected.entries.has(target.uid));
+			return this.send(`${tag} NO ${stillHere ? "Some of the requested messages could not be moved" : "Some of the requested messages no longer exist"}`);
+		}
+		await this.send(`${tag} OK ${uidMode ? "UID MOVE" : "MOVE"} completed`);
+	}
+
+	/** Post-MOVE spam training. The move has committed: a failure here is logged, never answered. */
+	private async train(messageIds: string[], classification: "spam" | "ham"): Promise<void> {
+		try {
+			const failed = await trainImapSpamFeedback(this.env, this.principal!, messageIds, classification);
+			for (const { messageId, error } of failed) this.host.log({ event: "move.spam-training-error", messageId, error: error instanceof Error ? error.message : String(error) });
+		} catch (error) {
+			if (error instanceof ImapStateError && error.code === "forbidden") throw error;
+			this.host.log({ event: "move.spam-training-error", error: error instanceof Error ? error.message : String(error) });
+		}
 	}
 
 	private async search(tag: string, reader: CommandReader, uidMode: boolean): Promise<void> {

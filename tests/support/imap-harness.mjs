@@ -41,6 +41,9 @@ export async function loadApp(name) {
 				export { POST as readRoute } from "./src/app/api/messages/[messageId]/read/route.ts";
 				export { POST as bulkRoute } from "./src/app/api/messages/bulk/route.ts";
 				export { getUserMailRevision } from "./src/lib/realtime/revision.ts";
+				export { handleJmapRequest } from "./src/lib/jmap/handler.ts";
+				export { encodeMailboxRef } from "./src/lib/jmap/ids.ts";
+				export * as spamFeedback from "./src/lib/spam/feedback.ts";
 				export { default as PostalMime } from "postal-mime";
 			`,
 			resolveDir: root,
