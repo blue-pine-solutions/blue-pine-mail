@@ -111,8 +111,19 @@ export type ImapFlagStore = { mode: "replace" | "add" | "remove"; flags: ImapFla
  * `unsupported`: the change is not available on this server.
  * `nonexistent`: the folder operated on (for the listener, the selected one) is gone.
  * `nonexistent-destination`: a MOVE destination does not exist; the source is intact.
+ * `unconfirmed`: the principal's authority could not be evaluated at all (the database failed
+ *   while authorizing), as opposed to evaluated and refused (`forbidden`). Only
+ *   getImapChangeSignal reports it, so IDLE can fail closed on prolonged uncertainty.
  */
-export type ImapStateErrorCode = "forbidden" | "denied" | "unsupported" | "nonexistent" | "nonexistent-destination" | "unavailable";
+export type ImapStateErrorCode = "forbidden" | "denied" | "unsupported" | "nonexistent" | "nonexistent-destination" | "unavailable" | "unconfirmed";
+
+/**
+ * IDLE's cross-process change signal (A5.4, getImapChangeSignal), read from the database: the
+ * mailbox's JMAP revision, which moves with every insert, update and delete of its messages and
+ * folders, and the selected folder's UIDVALIDITY (null without a folder, or before its IMAP
+ * state exists).
+ */
+export type ImapChangeSignal = { revision: number; uidValidity: number | null };
 
 /**
  * What a MOVE into a folder does to a message: the product state it takes and the spam

@@ -109,11 +109,19 @@ test("framing: oversize literals are refused before continuation; oversize lines
 	assert.equal(nonSync.fatal, true);
 });
 
-test("framing: an AUTHENTICATE response line is not parsed as a command", () => {
+test("framing: a continuation line (AUTHENTICATE response, IDLE's DONE) is not parsed as a command", () => {
 	const { instance, push } = framer();
-	instance.expectSaslLine();
-	assert.deepEqual(push("AGEAYg== {5}\r\n"), [{ kind: "sasl", line: "AGEAYg== {5}" }]);
-	assert.equal(push("b NOOP\r\n")[0].kind, "command");
+	instance.expectContinuationLine();
+	assert.deepEqual(push("AGEAYg== {5}\r\n"), [{ kind: "continuation", line: "AGEAYg== {5}" }], "raw: a trailing {n} announces no literal");
+	assert.equal(push("b NOOP\r\n")[0].kind, "command", "one line only");
+	instance.expectContinuationLine();
+	assert.deepEqual(push("DO"), [], "a line split across chunks waits for its end");
+	assert.deepEqual(push("NE\r\nc NOOP\r\n"), [{ kind: "continuation", line: "DONE" }, { kind: "command", parts: [{ kind: "text", text: "c NOOP" }] }], "input after the line is framed as usual");
+	const partial = framer();
+	partial.push("d SELECT {5}\r\n");
+	assert.equal(partial.instance.midCommand, true, "awaiting a literal's octets");
+	partial.push("INBOX\r\n");
+	assert.equal(partial.instance.midCommand, false);
 });
 
 test("framing: next() yields one item at a time so a full queue can stop framing", () => {

@@ -188,7 +188,7 @@ test("a5.2a/a5.2c: PERMANENTFLAGS include \\Deleted for a manager in every folde
 	const reader = await connect(context, SHARED);
 	assert.equal(permanent(await reader.client.command("SELECT INBOX")), "* OK [PERMANENTFLAGS (\\Seen \\Flagged)] Flags permitted");
 	const capability = texts(await context.client.command("CAPABILITY"))[0];
-	assert.equal(capability, "* CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS", "MOVE (A5.2b), UIDPLUS (A5.3) and nothing else new (A5.2c adds no capability)");
+	assert.equal(capability, "* CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS IDLE", "MOVE (A5.2b), UIDPLUS (A5.3), IDLE (A5.4) and nothing else new (A5.2c adds no capability)");
 });
 
 test("a5.2a: STORE \\Deleted with +FLAGS, -FLAGS, FLAGS and .SILENT; it persists across reconnects and is seen by a second session", async (t) => {

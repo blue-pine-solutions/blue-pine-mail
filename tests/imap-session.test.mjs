@@ -55,9 +55,9 @@ test("gate2: LOGIN with a mail app password; capabilities change after authentic
 	const context = await ready(t);
 	const { credential } = await context.credential("user-a", "mbx-a");
 	const result = await context.client.login("A@Example.TEST ", credential);
-	assertTagged(result, "OK", /^t\d+ OK \[CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS\] Logged in/);
+	assertTagged(result, "OK", /^t\d+ OK \[CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS IDLE\] Logged in/);
 	const after = await context.client.command("CAPABILITY");
-	assert.equal(after.untagged[0].text, "* CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS");
+	assert.equal(after.untagged[0].text, "* CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS IDLE");
 	assertTagged(await context.client.login("a@example.test", credential), "BAD", /not valid/);
 	assert.deepEqual(context.client.logs.find((event) => event.event === "auth.success"), { event: "auth.success", userId: "user-a", mailboxId: "mbx-a", appPasswordId: "map-1" });
 	// Literal username/password (synchronizing literals) work too.
@@ -364,7 +364,8 @@ test("gate3: every mutating command other than STORE, EXPUNGE, UID EXPUNGE, CLOS
 	assertTagged(await context.client.collect("ap"), "NO", /CANNOT/);
 	context.client.write("big APPEND INBOX {70000}\r\n");
 	assertTagged(await context.client.collect("big"), "BAD", /Literal too large/);
-	for (const command of ["IDLE", "ENABLE CONDSTORE", "COMPRESS DEFLATE", "GETQUOTAROOT INBOX", "XLIST \"\" *"]) {
+	// IDLE (A5.4) is certified in imap-idle.test.mjs.
+	for (const command of ["ENABLE CONDSTORE", "COMPRESS DEFLATE", "GETQUOTAROOT INBOX", "XLIST \"\" *"]) {
 		assertTagged(await context.client.command(command), "BAD", /Unknown command/);
 	}
 	// UID EXPUNGE (A5.3) of a message not marked \Deleted changes nothing.

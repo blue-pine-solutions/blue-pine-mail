@@ -3,7 +3,7 @@ import { X509Certificate } from "node:crypto";
 import type { AddressInfo, Socket } from "node:net";
 import { createSecureContext, createServer, type TLSSocket } from "node:tls";
 import { DISTRIBUTION } from "@/lib/distribution/identity";
-import { ImapSession } from "@/lib/imap-server/session";
+import { DEFAULT_IDLE_TIMING, ImapSession } from "@/lib/imap-server/session";
 import type { ImapLogEvent, ImapSessionHost } from "@/lib/imap-server/types";
 import { clientAddressKey, ConcurrencyCounter, Semaphore, SlidingWindowCounter } from "./imap-limits";
 
@@ -30,11 +30,23 @@ export type ImapLimits = {
 	/** Added before each attempt for a username past its failure limit (a delay, never a lockout). */
 	usernameThrottleDelayMs: number;
 	handshakeTimeoutMs: number;
+	/**
+	 * Autologout: the session ends after this long without input from the client (before and
+	 * after authentication). Only client input counts; the server's own writes (IDLE
+	 * notifications, keepalives, continuations) never postpone it.
+	 */
 	unauthenticatedIdleMs: number;
 	authenticatedIdleMs: number;
 	accessCheckIntervalMs: number;
 	maxConcurrentReads: number;
 	shutdownGraceMs: number;
+	/** IDLE (A5.4): change-signal poll, its ±jitter, unconditional reconciliation, keepalive, fail-closed cutoffs. */
+	idlePollMs: number;
+	idlePollJitter: number;
+	idleReconcileMs: number;
+	idleKeepaliveMs: number;
+	idleAuthUncertainMs: number;
+	idleUnavailableMs: number;
 };
 
 export const DEFAULT_IMAP_LIMITS: ImapLimits = {
@@ -52,6 +64,12 @@ export const DEFAULT_IMAP_LIMITS: ImapLimits = {
 	accessCheckIntervalMs: 60_000,
 	maxConcurrentReads: 8,
 	shutdownGraceMs: 2_000,
+	idlePollMs: DEFAULT_IDLE_TIMING.pollMs,
+	idlePollJitter: DEFAULT_IDLE_TIMING.pollJitter,
+	idleReconcileMs: DEFAULT_IDLE_TIMING.reconcileMs,
+	idleKeepaliveMs: DEFAULT_IDLE_TIMING.keepaliveMs,
+	idleAuthUncertainMs: DEFAULT_IDLE_TIMING.authUncertainMs,
+	idleUnavailableMs: DEFAULT_IDLE_TIMING.unavailableMs,
 };
 
 const TLS_MIN_VERSION = "TLSv1.2";
@@ -177,6 +195,18 @@ export async function startImapListener(
 		const timers = new Set<ReturnType<typeof setTimeout>>();
 		const delays = new Set<() => void>();
 		let claimedUser: string | null = null;
+		let socketClosed = false;
+		// Autologout counts client input only: Node's socket.setTimeout is also reset by our own
+		// writes, which would let IDLE keepalives keep a silent client connected forever.
+		let inputTimeoutMs = limits.unauthenticatedIdleMs;
+		// Fires only after `session` below is constructed.
+		const autologout = () => {
+			// refresh() re-arms a fired timer, so input during the close grace period lands here again.
+			if (session.isClosed) return;
+			log({ event: "idle.timeout", connection: id, ip, authenticated: session.isAuthenticated });
+			void session.end("Autologout; idle for too long");
+		};
+		let inputTimer = setTimeout(autologout, inputTimeoutMs);
 
 		const host: ImapSessionHost = {
 			write(bytes) {
@@ -200,19 +230,24 @@ export async function startImapListener(
 			},
 			pause: () => socket.pause(),
 			resume: () => socket.resume(),
-			delay(ms) {
+			delay(ms, signal) {
 				return new Promise((resolve) => {
+					// Nothing to wait for once the connection is gone or the caller gave up.
+					if (socketClosed || signal?.aborted) return resolve();
 					const finish = () => {
 						clearTimeout(timer);
 						timers.delete(timer);
 						delays.delete(finish);
+						signal?.removeEventListener("abort", finish);
 						resolve();
 					};
 					const timer = setTimeout(finish, ms);
 					timers.add(timer);
 					delays.add(finish);
+					signal?.addEventListener("abort", finish, { once: true });
 				});
 			},
+			now: () => Date.now(),
 			log: (event) => log({ ...event, connection: id, ip }),
 			beforeAuthenticate(username) {
 				if (addressFailures.exceeded(addressKey)) return { allowed: false, delayMs: 0 };
@@ -231,22 +266,34 @@ export async function startImapListener(
 				return true;
 			},
 			acquireRead: () => reads.acquire(),
-			onAuthenticated: () => socket.setTimeout(limits.authenticatedIdleMs),
+			onAuthenticated: () => {
+				inputTimeoutMs = limits.authenticatedIdleMs;
+				clearTimeout(inputTimer);
+				inputTimer = setTimeout(autologout, inputTimeoutMs);
+			},
 		};
 
-		const session = new ImapSession(env, host, { serverName: DISTRIBUTION.name });
+		const session = new ImapSession(env, host, {
+			serverName: DISTRIBUTION.name,
+			idle: {
+				pollMs: limits.idlePollMs,
+				pollJitter: limits.idlePollJitter,
+				reconcileMs: limits.idleReconcileMs,
+				keepaliveMs: limits.idleKeepaliveMs,
+				authUncertainMs: limits.idleAuthUncertainMs,
+				unavailableMs: limits.idleUnavailableMs,
+			},
+		});
 		sessions.set(socket, session);
 		socket.setNoDelay(true);
-		socket.setTimeout(limits.unauthenticatedIdleMs);
-		socket.on("timeout", () => {
-			log({ event: "idle.timeout", connection: id, ip, authenticated: session.isAuthenticated });
-			void session.end("Autologout; idle for too long");
-		});
 		socket.on("data", (chunk: Buffer) => {
+			inputTimer.refresh();
 			session.receive(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
 		});
 		socket.on("error", (error) => log({ event: "socket.error", connection: id, ip, error: error.message }));
 		socket.on("close", () => {
+			socketClosed = true;
+			clearTimeout(inputTimer);
 			session.transportClosed();
 			sessions.delete(socket);
 			for (const finish of [...delays]) finish();

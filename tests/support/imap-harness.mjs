@@ -20,7 +20,7 @@ export async function loadApp(name) {
 	await build({
 		stdin: {
 			contents: `
-				export { ImapSession, PREAUTH_CAPABILITIES, AUTH_CAPABILITIES, copyUidData } from "./src/lib/imap-server/session.ts";
+				export { ImapSession, PREAUTH_CAPABILITIES, AUTH_CAPABILITIES, DEFAULT_IDLE_TIMING, copyUidData } from "./src/lib/imap-server/session.ts";
 				export { MetadataCache } from "./src/lib/imap-server/metadata-cache.ts";
 				export * as mime from "./src/lib/imap-server/mime.ts";
 				export * as names from "./src/lib/imap-server/mailbox-names.ts";
@@ -247,7 +247,7 @@ export class RawClient {
 }
 
 /** A session driven in memory: no socket, same protocol engine. */
-export function memoryClient(app, env, hostOverrides = {}) {
+export function memoryClient(app, env, hostOverrides = {}, sessionOptions = {}) {
 	const client = new RawClient();
 	const logs = [];
 	const host = {
@@ -256,6 +256,7 @@ export function memoryClient(app, env, hostOverrides = {}) {
 		pause() {},
 		resume() {},
 		delay: async () => {},
+		now: () => Date.now(),
 		log: (event) => logs.push(event),
 		beforeAuthenticate: () => ({ allowed: true, delayMs: 0 }),
 		afterAuthenticate() {},
@@ -264,11 +265,77 @@ export function memoryClient(app, env, hostOverrides = {}) {
 		onAuthenticated() {},
 		...hostOverrides,
 	};
-	const session = new app.ImapSession(env, host, { serverName: "Blue Pine Solutions Mail", cache: new app.MetadataCache() });
+	const session = new app.ImapSession(env, host, { serverName: "Blue Pine Solutions Mail", cache: new app.MetadataCache(), ...sessionOptions });
 	client.write = (text) => session.receive(typeof text === "string" ? Buffer.from(text, "latin1") : text);
 	client.session = session;
 	client.logs = logs;
 	return { client, session, start: () => session.start().then(() => client.unit()) };
+}
+
+/**
+ * A deterministic clock for a session host (A5.4 IDLE): `now()` is virtual, and `delay(ms, signal)`
+ * resolves only when `advance()` moves time past it, when `signal` aborts, or at once if it
+ * already has. Pass `{ now: clock.now, delay: clock.delay }` as memoryClient host overrides and
+ * `clock.watch(session)` so `advance` knows when the session has gone quiet again.
+ *
+ * `advance(ms)` fires due timers one at a time in time order; after each it waits (in real
+ * time, bounded by `settleMs`) until the session registers its next delay, stops idling or
+ * closes, so every step of an IDLE loop runs to completion before time moves on.
+ */
+export function createClock(start = 1_000_000) {
+	let time = start;
+	let registrations = 0;
+	let session = null;
+	const pending = new Set();
+	const clock = {
+		now: () => time,
+		get pending() {
+			return pending.size;
+		},
+		get registrations() {
+			return registrations;
+		},
+		watch(target) {
+			session = target;
+		},
+		delay(ms, signal) {
+			return new Promise((resolve) => {
+				if (signal?.aborted || session?.isClosed) return resolve();
+				registrations += 1;
+				const entry = { due: time + Math.max(0, ms), resolve: () => finish() };
+				const finish = () => {
+					pending.delete(entry);
+					signal?.removeEventListener("abort", finish);
+					resolve();
+				};
+				signal?.addEventListener("abort", finish, { once: true });
+				pending.add(entry);
+			});
+		},
+		/** Resolve once the watched session registered a delay after `mark`, or stopped idling, or closed. */
+		async settle(mark = registrations, settleMs = 3_000) {
+			const deadline = Date.now() + settleMs;
+			while (Date.now() < deadline) {
+				if (registrations > mark || (session && (!session.isIdling || session.isClosed))) return true;
+				await new Promise((resolve) => setImmediate(resolve));
+			}
+			return false;
+		},
+		async advance(ms, settleMs) {
+			const target = time + ms;
+			for (;;) {
+				let next = null;
+				for (const entry of pending) if (entry.due <= target && (!next || entry.due < next.due)) next = entry;
+				if (!next) break;
+				time = Math.max(time, next.due);
+				const mark = registrations;
+				next.resolve();
+				await clock.settle(mark, settleMs);
+			}
+			time = target;
+		},
+	};
+	return clock;
 }
 
 /** A self-signed certificate for 127.0.0.1/localhost, generated now with openssl. */

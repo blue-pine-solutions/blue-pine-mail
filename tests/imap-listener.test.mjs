@@ -300,7 +300,7 @@ test("gate7: an end-to-end session over TLS", async (t) => {
 	const { listener, good, bytes, database, row } = await populated(t);
 	const { client } = await connected(listener.port);
 	assert.deepEqual((await client.command("CAPABILITY")).untagged.map((unit) => unit.text), ["* CAPABILITY IMAP4rev1 SASL-IR AUTH=PLAIN ID"]);
-	assertTagged(await client.command(`AUTHENTICATE PLAIN ${Buffer.from(`\0a@example.test\0${good}`).toString("base64")}`), "OK", /\[CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS\]/);
+	assertTagged(await client.command(`AUTHENTICATE PLAIN ${Buffer.from(`\0a@example.test\0${good}`).toString("base64")}`), "OK", /\[CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS IDLE\]/);
 	const list = await client.command('LIST "" "*"');
 	assert.equal(list.untagged.length, 8, "six system folders, Work and the Unicode folder");
 	assert.equal(list.untagged.at(-1).text, '* LIST (\\Noinferiors) NIL "Caf&AOk-/&ANw-n&AO8-code"');

@@ -235,6 +235,14 @@ test("the IMAP state layer, flag writes included, stays Workers/D1-safe", () => 
 	assert.doesNotMatch(session, /\[APPENDUID/);
 	assert.match(session.match(/export const AUTH_CAPABILITIES = "([^"]*)"/)[1], /(^| )UIDPLUS( |$)/);
 	assert.match(session, /const UNSUPPORTED_COMMANDS = new Set\(\["COPY", "APPEND", "CREATE", "DELETE", "RENAME", "SUBSCRIBE", "UNSUBSCRIBE"\]\);/);
+	// IDLE (A5.4): the database is its only source of truth. Neither the engine nor the listener
+	// may consult the process-local realtime hub, and only the listener polls the change signal.
+	assert.match(session.match(/export const AUTH_CAPABILITIES = "([^"]*)"/)[1], /(^| )IDLE( |$)/);
+	for (const file of [...sourceFiles(join("src", "lib", "imap-server")), join("server", "runtime", "imap.ts")]) {
+		assert.doesNotMatch(read(file), /@\/lib\/realtime|RealtimeHub|REALTIME|runtime\/realtime/, `${file} must not use the realtime hub`);
+	}
+	const signalCallers = [...sourceFiles("src"), "worker.ts", "worker-utils.ts"].filter((file) => /\bgetImapChangeSignal\(/.test(read(file)) && dirname(file) !== join("src", "lib", "imap"));
+	assert.deepEqual(signalCallers, [join("src", "lib", "imap-server", "session.ts")]);
 });
 
 const workersBuild = join(root, "dist", "server");

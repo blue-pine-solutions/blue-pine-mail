@@ -25,7 +25,7 @@ export class CommandFramer {
 	private literalChunks: Uint8Array[] = [];
 	private literalTotal = 0;
 	private literalCount = 0;
-	private saslPending = false;
+	private continuationPending = false;
 	private failed = false;
 
 	constructor(
@@ -33,9 +33,19 @@ export class CommandFramer {
 		private readonly onContinuation: () => void,
 	) {}
 
-	/** The next line is an AUTHENTICATE response, not a command. */
-	expectSaslLine(): void {
-		this.saslPending = true;
+	/**
+	 * The next line answers a server continuation (an AUTHENTICATE response, or IDLE's DONE):
+	 * it is returned raw, as one `continuation` item, never parsed as a command and never
+	 * treated as announcing a literal. The line limit still applies. One line only; framing
+	 * is normal again after it.
+	 */
+	expectContinuationLine(): void {
+		this.continuationPending = true;
+	}
+
+	/** Whether a command is partly framed (awaiting the rest of a line or a literal's octets). */
+	get midCommand(): boolean {
+		return this.parts.length > 0 || this.literalRemaining >= 0;
 	}
 
 	/** Take received octets. Nothing is interpreted until next() is called. */
@@ -79,9 +89,9 @@ export class CommandFramer {
 			const line = bytesToBinary(this.storage, this.start, lineEnd);
 			this.start = newline + 1;
 			this.scanned = 0;
-			if (this.saslPending && this.parts.length === 0) {
-				this.saslPending = false;
-				return { kind: "sasl", line };
+			if (this.continuationPending && this.parts.length === 0) {
+				this.continuationPending = false;
+				return { kind: "continuation", line };
 			}
 			const item = this.acceptLine(line, limits);
 			if (item) return item;

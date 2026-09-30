@@ -5,7 +5,8 @@
  * canonical bytes, batched flag writes (A5.1), bp0003's \Deleted invariant, \Deleted and
  * recoverable EXPUNGE (A5.2a), MOVE and its spam training (A5.2b), bp0004 and permanent
  * EXPUNGE in Trash and Drafts over D1 and R2 (A5.2c), UID EXPUNGE and MOVE's destination UIDs
- * for COPYUID (A5.3), the database guards, backup/restore and a restart.
+ * for COPYUID (A5.3), IDLE's change signal (A5.4), the database guards, backup/restore and a
+ * restart.
  *
  *   node scripts/imap-state-d1-check.mjs
  *
@@ -630,6 +631,26 @@ try {
 	check("revoked delegate is refused on the next call", (await op("openImapFolder", { userId: "user-b", mailboxId: "mbx-s" }, "inbox")).code === "forbidden");
 	check("another mailbox's folders are unreachable", (await op("openImapFolder", { userId: "user-b", mailboxId: "mbx-a" }, "inbox")).code === "forbidden");
 	check("a revoked delegate's STORE is forbidden, not denied", (await op("store", { userId: "user-b", mailboxId: "mbx-s" }, "inbox", [1], { mode: "add", flags: ["seen"] })).code === "forbidden");
+
+	console.log("IDLE change signal (A5.4, D1)");
+	const signalInbox = await op("openImapFolder", owner, "inbox");
+	const signalBefore = await op("getImapChangeSignal", owner, "inbox");
+	check("the signal reads the mailbox revision and the folder's UIDVALIDITY", Number.isInteger(signalBefore.revision) && signalBefore.revision > 0 && signalBefore.uidValidity === signalInbox.uidValidity, signalBefore);
+	await sql(["INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, status, created_at) VALUES ('sig-1', 'user-a', 'mbx-a', 'inbound', 's@x', 'a@example.test', 'received', 30000)"]);
+	const signalAfter = await op("getImapChangeSignal", owner, "inbox");
+	check("an inserted message moves the revision; UIDVALIDITY is unchanged", signalAfter.revision > signalBefore.revision && signalAfter.uidValidity === signalBefore.uidValidity, [signalBefore, signalAfter]);
+	const flagged = await sql(["SELECT revision FROM jmap_mailbox_revisions WHERE mailbox_id = 'mbx-a'"]);
+	check("the signal reads exactly jmap_mailbox_revisions", flagged[0][0].revision === signalAfter.revision, flagged);
+	const signalIds = (await op("openImapFolder", owner, "inbox")).messages.filter((entry) => entry.messageId === "sig-1").map((entry) => entry.uid);
+	await op("store", owner, "inbox", signalIds, { mode: "add", flags: ["deleted"] });
+	check("a \\Deleted mark does not move the revision (the reconciliation covers it)", (await op("getImapChangeSignal", owner, "inbox")).revision === signalAfter.revision);
+	await op("store", owner, "inbox", signalIds, { mode: "remove", flags: ["deleted"] });
+	check("without a folder only authority and the revision are read", same(await op("getImapChangeSignal", owner, null), { revision: signalAfter.revision, uidValidity: null }));
+	check("a principal without access is forbidden", (await op("getImapChangeSignal", { userId: "user-b", mailboxId: "mbx-a" }, "inbox")).code === "forbidden");
+	check("a custom folder that does not exist is nonexistent", (await op("getImapChangeSignal", owner, "f:nope")).code === "nonexistent");
+	await sql(["UPDATE users SET disabled = 1 WHERE id = 'user-a'"]);
+	check("a disabled user is forbidden", (await op("getImapChangeSignal", owner, "inbox")).code === "forbidden");
+	await sql(["UPDATE users SET disabled = 0 WHERE id = 'user-a'"]);
 
 	console.log("bp0004 upgrade of an existing D1 database (Workers runner)");
 	const draftTriggers = (await sql(["SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'bp_imap_draft_%' ORDER BY name"]))[0];

@@ -1,7 +1,7 @@
 import { and, asc, eq, exists, inArray, isNull, lte, ne, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import type { AppDatabase } from "@/db";
-import { folders, messages } from "@/db/schema";
+import { folders, jmapMailboxRevisions, messages } from "@/db/schema";
 import { imapMessageUids } from "@/db/schema/bluepine";
 import { resolveCanonicalMessage } from "@/lib/email/canonical-message";
 import { fingerprintFromKey, isCanonicalKey } from "@/lib/email/canonical-message-utils";
@@ -26,6 +26,7 @@ import {
 import type { ImapFolderRow } from "./state";
 import type {
 	ImapAccess,
+	ImapChangeSignal,
 	ImapFlagChanges,
 	ImapFlagName,
 	ImapFlags,
@@ -213,6 +214,41 @@ export async function openImapFolder(env: CloudflareEnv, principal: ImapPrincipa
 	const entries = await readEntries(opened, folder.id);
 	const state = (await findFolderRow(opened.db, opened.access.mailboxId, opened.mailbox.key))!;
 	return { mailbox: opened.mailbox, uidValidity: state.uidValidity, uidNext: state.uidNext, messages: entries };
+}
+
+/**
+ * IDLE's fast, cross-process change signal (A5.4): the principal's authority re-established
+ * from current state, then the mailbox's revision and the folder's UIDVALIDITY, each one indexed
+ * lookup. It never scans the folder, assigns a UID or writes anything; the caller refreshes its
+ * view (openImapFolder) only when the signal moved, and reconciles periodically regardless,
+ * because the revision does not cover IMAP-only state such as \Deleted marks or Drafts UIDs
+ * released by an attachment change. UIDVALIDITY, which it does not cover either, is read here.
+ *
+ * `key` null (IDLE outside a selected mailbox) checks authority and reads the revision only.
+ * Throws `forbidden` when access is gone, `nonexistent` when the folder is, and `unconfirmed`
+ * when authority could not be evaluated at all (a database failure while authorizing); any
+ * other failure is a database failure after authority was confirmed.
+ */
+export async function getImapChangeSignal(env: CloudflareEnv, principal: ImapPrincipal, key: ImapFolderKey | null): Promise<ImapChangeSignal> {
+	const db = getDb(env);
+	let access: ImapAccess | null;
+	try {
+		access = await authorizeImapAccess(db, principal);
+	} catch (error) {
+		throw new ImapStateError("unconfirmed", `Access could not be checked: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	if (!access) throw new ImapStateError("forbidden", "Mailbox access denied");
+	const [row] = await db.select({ revision: jmapMailboxRevisions.revision }).from(jmapMailboxRevisions).where(eq(jmapMailboxRevisions.mailboxId, access.mailboxId)).limit(1);
+	const revision = Number(row?.revision ?? 0);
+	if (key === null) return { revision, uidValidity: null };
+	const parsed = parseFolderKey(key);
+	if (!parsed) throw new ImapStateError("nonexistent", "No such folder");
+	if (parsed.kind === "folder") {
+		const [folder] = await db.select({ id: folders.id }).from(folders).where(and(eq(folders.id, parsed.folderId), eq(folders.mailboxId, access.mailboxId))).limit(1);
+		if (!folder) throw new ImapStateError("nonexistent", "No such folder");
+	}
+	const state = await findFolderRow(db, access.mailboxId, key);
+	return { revision, uidValidity: state?.uidValidity ?? null };
 }
 
 /** STATUS-style counters for a folder, on the same synchronized state as openImapFolder. */

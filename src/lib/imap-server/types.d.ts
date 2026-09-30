@@ -1,12 +1,12 @@
-import type { ImapFlagName, ImapFlags, ImapFolderKey, ImapMessageEntry, ImapPrincipal } from "@/lib/imap/types";
+import type { ImapChangeSignal, ImapFlagName, ImapFlags, ImapFolderKey, ImapMessageEntry, ImapPrincipal } from "@/lib/imap/types";
 
 /** One piece of a framed command: a line fragment (bytes as latin1 text) or a literal's octets. */
 export type CommandPart = { kind: "text"; text: string } | { kind: "literal"; bytes: Uint8Array };
 
-/** What the framer hands the session: a complete command, a SASL continuation line, or a framing error. */
+/** What the framer hands the session: a complete command, a line answering a continuation (AUTHENTICATE, IDLE), or a framing error. */
 export type FramedItem =
 	| { kind: "command"; parts: CommandPart[] }
-	| { kind: "sasl"; line: string }
+	| { kind: "continuation"; line: string }
 	| { kind: "error"; tag: string | null; message: string; fatal: boolean };
 
 export type FramerLimits = {
@@ -82,6 +82,13 @@ export type SelectedMailbox = {
 	entries: Map<number, SnapshotEntry>;
 	/** UIDs no longer in the folder whose EXPUNGE has not been sent yet. */
 	vanished: Set<number>;
+	/**
+	 * IDLE (A5.4): the change signal read before the last refresh IDLE made for this selection
+	 * (null: none yet), and when IDLE next reconciles unconditionally (null: not scheduled).
+	 * Kept across IDLE commands, reset by selecting again.
+	 */
+	idleSignal: ImapChangeSignal | null;
+	reconcileAt: number | null;
 };
 
 export type ImapLogEvent = { event: string } & Record<string, string | number | boolean | null | undefined>;
@@ -95,8 +102,13 @@ export type ImapSessionHost = {
 	/** Stop or resume reading from the client (backpressure). */
 	pause(): void;
 	resume(): void;
-	/** Resolves after `ms`, or early when the session closes. */
-	delay(ms: number): Promise<void>;
+	/**
+	 * Resolves after `ms`, or early when the session closes or `signal` aborts; at once if either
+	 * already happened. Its timer never outlives it.
+	 */
+	delay(ms: number, signal?: AbortSignal): Promise<void>;
+	/** The current time in milliseconds (the clock `delay` runs on). */
+	now(): number;
 	log(event: ImapLogEvent): void;
 	/** Rate-limit decisions before an authentication attempt; `delayMs` is added before answering. */
 	beforeAuthenticate(username: string): { allowed: boolean; delayMs: number };

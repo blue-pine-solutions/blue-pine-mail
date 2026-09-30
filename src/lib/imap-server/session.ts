@@ -1,6 +1,6 @@
 import { getDb } from "@/db";
 import { authorizeImapAccess } from "@/lib/imap/access";
-import { expungeImapFolder, fetchImapMessage, getImapFolderStatus, listImapMailboxes, moveImapMessages, openImapFolder, storeImapFlags, trainImapSpamFeedback } from "@/lib/imap/service";
+import { expungeImapFolder, fetchImapMessage, getImapChangeSignal, getImapFolderStatus, listImapMailboxes, moveImapMessages, openImapFolder, storeImapFlags, trainImapSpamFeedback } from "@/lib/imap/service";
 import type { ImapFlagName, ImapFlags, ImapFolderSnapshot, ImapMailbox, ImapMoveResult } from "@/lib/imap/types";
 import { ImapStateError, STORABLE_FLAGS } from "@/lib/imap/utils";
 import { verifyMailAppPassword } from "@/lib/mail-app-passwords/verify";
@@ -47,12 +47,41 @@ import type { FetchItem, FramedItem, FramerLimits, ImapSessionHost, SelectedMail
  * Every other command that would write (COPY, APPEND, folder management) is refused before
  * any storage call. UIDPLUS's APPENDUID and COPYUID for COPY are owed only by a successful
  * APPEND or COPY, which do not exist yet.
+ *
+ * IDLE (A5.4, RFC 2177) waits for DONE while polling the database, never a process-local
+ * event: A3's getImapChangeSignal (authority, mailbox revision, UIDVALIDITY) at a jittered
+ * interval, the existing refresh when the signal moved, and an unconditional refresh at a
+ * slower interval for the IMAP-only state the revision does not cover. See idle().
  */
 
 /** Capabilities before authentication. Each is implemented and tested (tests/imap-listener.test.mjs). */
 export const PREAUTH_CAPABILITIES = "IMAP4rev1 SASL-IR AUTH=PLAIN ID";
-/** Capabilities once authenticated. Like MOVE, UIDPLUS only extends commands of the authenticated states. */
-export const AUTH_CAPABILITIES = "IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS";
+/** Capabilities once authenticated. Like MOVE, UIDPLUS and IDLE only extend commands of the authenticated states. */
+export const AUTH_CAPABILITIES = "IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS IDLE";
+
+/** IDLE timing (A5.4). The listener passes its ImapLimits values; these are the defaults. */
+export type IdleTiming = {
+	/** Change-signal poll interval (authority, revision, UIDVALIDITY), jittered by ±pollJitter. */
+	pollMs: number;
+	pollJitter: number;
+	/** Unconditional refresh of the selected mailbox, for state the revision does not cover; jittered the same way. */
+	reconcileMs: number;
+	/** `* OK Still here` after this long without any write to the client. */
+	keepaliveMs: number;
+	/** Authority not confirmed for this long (the database failing while authorizing): BYE. */
+	authUncertainMs: number;
+	/** No successful poll for longer than this, authority confirmed or not: BYE [UNAVAILABLE]. */
+	unavailableMs: number;
+};
+
+export const DEFAULT_IDLE_TIMING: IdleTiming = {
+	pollMs: 10_000,
+	pollJitter: 0.2,
+	reconcileMs: 300_000,
+	keepaliveMs: 120_000,
+	authUncertainMs: 60_000,
+	unavailableMs: 120_000,
+};
 
 export const MAX_QUEUED_COMMANDS = 16;
 export const MAX_LINE = 64 * 1024;
@@ -78,7 +107,13 @@ export type ImapSessionOptions = {
 	/** Product name for the greeting and ID. */
 	serverName: string;
 	cache?: MetadataCache;
+	idle?: Partial<IdleTiming>;
+	/** Source of IDLE's jitter, in [0, 1). */
+	random?: () => number;
 };
+
+/** Receives the line answering a continuation, a framing error in its place, or null when the session closes. */
+type ContinuationWaiter = (item: FramedItem | null) => void;
 
 export class ImapSession {
 	private state: State = "not-authenticated";
@@ -90,14 +125,34 @@ export class ImapSession {
 	private paused = false;
 	private closed = false;
 	private failures = 0;
-	private saslWaiter: ((line: string | null) => void) | null = null;
+	/** Receives the next continuation line (AUTHENTICATE, IDLE), or a framing error, or null on close. */
+	private continuationWaiter: ContinuationWaiter | null = null;
 	private readonly cache: MetadataCache;
+	private readonly host: ImapSessionHost;
+	private readonly idleTiming: IdleTiming;
+	private idling = false;
+	/** When the last write to the client started, and how many are still pending (keepalive). */
+	private lastWriteAt = 0;
+	private pendingWrites = 0;
 
 	constructor(
 		private readonly env: CloudflareEnv,
-		private readonly host: ImapSessionHost,
+		host: ImapSessionHost,
 		private readonly options: ImapSessionOptions,
 	) {
+		// Every write goes through here, so IDLE knows when the client last heard from us and
+		// whether a write is still in flight.
+		this.host = {
+			...host,
+			write: (bytes) => {
+				this.lastWriteAt = host.now();
+				this.pendingWrites += 1;
+				return host.write(bytes).finally(() => {
+					this.pendingWrites -= 1;
+				});
+			},
+		};
+		this.idleTiming = { ...DEFAULT_IDLE_TIMING, ...options.idle };
 		this.cache = options.cache ?? sharedMetadataCache;
 		this.framer = new CommandFramer(
 			() => this.limits(),
@@ -111,6 +166,11 @@ export class ImapSession {
 
 	get isClosed(): boolean {
 		return this.closed;
+	}
+
+	/** Whether an IDLE command is running. */
+	get isIdling(): boolean {
+		return this.idling;
 	}
 
 	private limits(): FramerLimits {
@@ -134,13 +194,17 @@ export class ImapSession {
 		this.markClosed();
 	}
 
-	/** End the session with `* BYE` (server shutdown, timeouts). */
+	/**
+	 * End the session with `* BYE` (server shutdown, timeouts). The transport is asked to close
+	 * right after the BYE is queued, not after it was written: a client that stopped reading
+	 * would otherwise keep the session open forever. Closing still delivers queued output first.
+	 */
 	async end(message: string): Promise<void> {
 		if (this.closed) return;
 		const bye = this.host.write(line(`* BYE ${responseText(message)}`));
 		this.markClosed();
-		await bye.catch(() => undefined);
 		this.host.close();
+		await bye.catch(() => undefined);
 	}
 
 	/**
@@ -165,8 +229,8 @@ export class ImapSession {
 	private markClosed(): void {
 		this.closed = true;
 		this.queue.length = 0;
-		const waiter = this.saslWaiter;
-		this.saslWaiter = null;
+		const waiter = this.continuationWaiter;
+		this.continuationWaiter = null;
 		waiter?.(null);
 	}
 
@@ -174,10 +238,12 @@ export class ImapSession {
 		while (!this.closed && this.queue.length < MAX_QUEUED_COMMANDS) {
 			const item = this.framer.next();
 			if (!item) break;
-			if (item.kind === "sasl" && this.saslWaiter) {
-				const waiter = this.saslWaiter;
-				this.saslWaiter = null;
-				waiter(item.line);
+			// A command waiting for a continuation line gets it, or the framing error that
+			// replaced it (which it hands back to the queue), and nothing else.
+			if (this.continuationWaiter && (item.kind === "continuation" || item.kind === "error")) {
+				const waiter = this.continuationWaiter;
+				this.continuationWaiter = null;
+				waiter(item);
 				continue;
 			}
 			this.queue.push(item);
@@ -218,7 +284,7 @@ export class ImapSession {
 			} else await this.send(`${item.tag ?? "*"} BAD ${item.message}`);
 			return;
 		}
-		if (item.kind === "sasl") {
+		if (item.kind === "continuation") {
 			await this.send("* BAD Unexpected continuation");
 			return;
 		}
@@ -310,6 +376,9 @@ export class ImapSession {
 				reader.end();
 				await this.send('* NAMESPACE (("" NIL)) NIL NIL');
 				return this.send(`${tag} OK NAMESPACE completed`);
+			case "IDLE":
+				reader.end();
+				return this.idle(tag);
 			case "LOGIN":
 			case "AUTHENTICATE":
 				return this.wrongState(tag);
@@ -356,7 +425,7 @@ export class ImapSession {
 	}
 
 	private isKnown(command: string): boolean {
-		return ["LIST", "LSUB", "STATUS", "SELECT", "EXAMINE", "NAMESPACE", "CHECK", "CLOSE", "UNSELECT", "FETCH", "UID FETCH", "SEARCH", "UID SEARCH", "LOGIN", "AUTHENTICATE", "STORE", "UID STORE", "COPY", "UID COPY", "MOVE", "UID MOVE", "EXPUNGE", "UID EXPUNGE", ...UNSUPPORTED_COMMANDS].includes(command);
+		return ["LIST", "LSUB", "STATUS", "SELECT", "EXAMINE", "NAMESPACE", "CHECK", "CLOSE", "UNSELECT", "FETCH", "UID FETCH", "SEARCH", "UID SEARCH", "LOGIN", "AUTHENTICATE", "STORE", "UID STORE", "COPY", "UID COPY", "MOVE", "UID MOVE", "EXPUNGE", "UID EXPUNGE", "IDLE", ...UNSUPPORTED_COMMANDS].includes(command);
 	}
 
 	// ---- any state --------------------------------------------------------------
@@ -391,9 +460,16 @@ export class ImapSession {
 		await this.tryCredentials(tag, binaryToUtf8(username), binaryToUtf8(password));
 	}
 
-	private waitForSasl(): Promise<string | null> {
+	/**
+	 * Switch the framer to take the next line raw and wait for it (or a framing error, or null
+	 * when the session closes). Call before sending the `+` continuation, so a reply that
+	 * arrives while the continuation is still being written cannot be queued as a command.
+	 */
+	private waitForContinuation(): Promise<FramedItem | null> {
+		this.framer.expectContinuationLine();
 		return new Promise((resolve) => {
-			this.saslWaiter = resolve;
+			if (this.closed) return resolve(null);
+			this.continuationWaiter = resolve;
 			this.fill();
 		});
 	}
@@ -409,10 +485,16 @@ export class ImapSession {
 			return;
 		}
 		if (response === null) {
-			this.framer.expectSaslLine();
+			const reply = this.waitForContinuation();
 			await this.send("+ ");
-			response = await this.waitForSasl();
-			if (response === null) return;
+			const item = await reply;
+			if (item === null) return;
+			if (item.kind !== "continuation") {
+				// A framing error instead of the response: handle it as the next item, as usual.
+				this.queue.unshift(item);
+				return;
+			}
+			response = item.line;
 			if (response === "*") {
 				await this.send(`${tag} BAD Authentication cancelled`);
 				return;
@@ -560,6 +642,8 @@ export class ImapSession {
 			highestUid: uids.length ? uids[uids.length - 1] : 0,
 			entries: new Map(snapshot.messages.map((entry) => [entry.uid, entry])),
 			vanished: new Set(),
+			idleSignal: null,
+			reconcileAt: null,
 		};
 		this.state = "selected";
 		const firstUnseen = snapshot.messages.findIndex((entry) => !entry.flags.seen);
@@ -902,6 +986,140 @@ export class ImapSession {
 		}
 	}
 
+	// ---- IDLE -------------------------------------------------------------------
+
+	/**
+	 * IDLE (RFC 2177), A5.4, in the authenticated and selected states (EXAMINE included). After
+	 * `+ idling` the next line is taken raw by the framer (never parsed as a command):
+	 *
+	 * - `DONE` (exactly, case-insensitive) ends it with a tagged OK; input after that line is
+	 *   framed as usual.
+	 * - Any other line ends it with `BAD Expected DONE` and is then run as the next command,
+	 *   unless it announces a literal whose octets would follow unannounced: that ends the
+	 *   session with BYE, since the stream could not be kept in sync.
+	 * - Input the client sent before our `+` (it must wait for it) is accepted only as a
+	 *   leading DONE; anything else ends IDLE at once with BAD and is run as usual.
+	 *
+	 * While idling nothing but the database decides what the client is told (idleLoop). The
+	 * server never ends IDLE itself with a tagged answer (a DONE could be on its way): it ends
+	 * the session with BYE, as everywhere, for lost access, a vanished or reset mailbox, or
+	 * prolonged database failure.
+	 */
+	private async idle(tag: string): Promise<void> {
+		if (this.queue.length || this.framer.midCommand) {
+			if (isDone(this.queue[0])) {
+				this.queue.shift();
+				await this.send("+ idling");
+				return this.send(`${tag} OK IDLE completed`);
+			}
+			return this.send(`${tag} BAD Expected DONE`);
+		}
+		const reply = this.waitForContinuation();
+		const stop = new AbortController();
+		let item: FramedItem | null = null;
+		void reply.then((value) => {
+			item = value;
+			stop.abort();
+		});
+		this.idling = true;
+		try {
+			await this.send("+ idling");
+			await this.idleLoop(stop.signal);
+		} finally {
+			this.idling = false;
+			stop.abort();
+		}
+		const answer = item as FramedItem | null;
+		if (this.closed || answer === null) return;
+		if (answer.kind !== "continuation") {
+			// A framing error (an overlong line) instead of DONE: handled next, as usual.
+			this.queue.unshift(answer);
+			return;
+		}
+		if (/^DONE$/i.test(answer.line)) return this.send(`${tag} OK IDLE completed`);
+		await this.send(`${tag} BAD Expected DONE`);
+		if (/\{\d+\+?\}$/.test(answer.line)) throw new SessionEnd("Protocol violation: a literal where DONE was expected");
+		this.queue.unshift({ kind: "command", parts: [{ kind: "text", text: answer.line }] });
+	}
+
+	/**
+	 * Until `stop` (DONE arrived) or the session closes: poll the change signal at a jittered
+	 * interval, starting at once; send `* OK Still here` when nothing was written for the
+	 * keepalive interval and no write is pending. Every wait is a host.delay that `stop` or the
+	 * session's close cancels, so nothing keeps running after IDLE ends. Writes are awaited, so
+	 * a client that stops reading stalls the loop instead of queueing output.
+	 */
+	private async idleLoop(stop: AbortSignal): Promise<void> {
+		const timing = this.idleTiming;
+		const selected = this.selected;
+		const health = { authConfirmedAt: this.host.now(), healthyAt: this.host.now() };
+		if (selected && selected.reconcileAt === null) selected.reconcileAt = this.host.now() + this.jittered(timing.reconcileMs);
+		let nextPoll = this.host.now();
+		while (!this.closed && !stop.aborted) {
+			const now = this.host.now();
+			if (now >= nextPoll) {
+				await this.idlePoll(selected, health);
+				nextPoll = this.host.now() + this.jittered(timing.pollMs);
+				continue;
+			}
+			const keepaliveAt = this.lastWriteAt + timing.keepaliveMs;
+			if (this.pendingWrites === 0 && now >= keepaliveAt) {
+				await this.send("* OK Still here");
+				continue;
+			}
+			const wakeAt = this.pendingWrites === 0 ? Math.min(nextPoll, keepaliveAt) : nextPoll;
+			await this.host.delay(Math.max(1, wakeAt - now), stop);
+		}
+	}
+
+	/**
+	 * One IDLE poll. A3's getImapChangeSignal re-establishes authority and reads the mailbox
+	 * revision and the selected folder's UIDVALIDITY (indexed lookups only). A changed
+	 * UIDVALIDITY ends the session; a changed revision, or a due reconciliation, runs the
+	 * existing refresh, which reports EXPUNGE, FETCH FLAGS and EXISTS against the session's
+	 * snapshot. The signal is read before refreshing and remembered only once the refresh
+	 * succeeded, so a change that lands during it is seen by the next poll.
+	 *
+	 * Failures: lost access (`forbidden`) ends the session with BYE, as does a vanished folder.
+	 * Anything else is logged and retried at the next poll, until authority has not been
+	 * confirmed for authUncertainMs (BYE: fail closed) or no poll has succeeded for
+	 * unavailableMs (BYE [UNAVAILABLE]).
+	 */
+	private async idlePoll(selected: SelectedMailbox | null, health: { authConfirmedAt: number; healthyAt: number }): Promise<void> {
+		const timing = this.idleTiming;
+		const now = this.host.now();
+		try {
+			const signal = await getImapChangeSignal(this.env, this.principal!, selected?.key ?? null);
+			health.authConfirmedAt = now;
+			if (selected) {
+				if (signal.uidValidity !== selected.uidValidity) throw new SessionEnd("Mailbox UIDVALIDITY changed, select it again");
+				const previous = selected.idleSignal;
+				const reconcile = now >= selected.reconcileAt!;
+				if (reconcile || !previous || previous.revision !== signal.revision) {
+					await this.refresh(true);
+					selected.idleSignal = signal;
+					if (reconcile) selected.reconcileAt = this.host.now() + this.jittered(timing.reconcileMs);
+				}
+			}
+			health.healthyAt = now;
+		} catch (error) {
+			if (error instanceof SessionEnd || (error instanceof ImapStateError && error.code === "forbidden")) throw error;
+			if (error instanceof ImapStateError && error.code === "nonexistent") throw new SessionEnd("Selected mailbox no longer exists");
+			const unconfirmed = error instanceof ImapStateError && error.code === "unconfirmed";
+			// Only a failure while authorizing leaves authority unconfirmed; any later failure came after it was confirmed.
+			if (!unconfirmed) health.authConfirmedAt = now;
+			this.host.log({ event: "idle.poll-error", unconfirmed, error: error instanceof Error ? error.message : String(error) });
+			if (now - health.authConfirmedAt >= timing.authUncertainMs) throw new SessionEnd("Access could not be confirmed");
+			if (now - health.healthyAt > timing.unavailableMs) throw new SessionEnd("[UNAVAILABLE] Mailbox state is unavailable");
+		}
+	}
+
+	/** `ms` scattered by ±pollJitter, so sessions started together do not poll together. */
+	private jittered(ms: number): number {
+		const random = this.options.random ?? Math.random;
+		return Math.max(1, Math.round(ms * (1 + (random() * 2 - 1) * this.idleTiming.pollJitter)));
+	}
+
 	private async search(tag: string, reader: CommandReader, uidMode: boolean): Promise<void> {
 		reader.sp();
 		const parsed = readSearch(reader);
@@ -963,6 +1181,11 @@ function uidRuns(uids: number[]): string {
 		index = end + 1;
 	}
 	return out.join(",");
+}
+
+/** A framed `DONE` line (IDLE's end), as the framer frames it outside continuation mode. */
+function isDone(item: FramedItem | undefined): boolean {
+	return item?.kind === "command" && item.parts.length === 1 && item.parts[0].kind === "text" && /^DONE$/i.test(item.parts[0].text);
 }
 
 /** FETCH items that set \Seen when fetched (RFC 3501 §6.4.5): BODY[…] without .PEEK, RFC822 and RFC822.TEXT, not RFC822.HEADER. */

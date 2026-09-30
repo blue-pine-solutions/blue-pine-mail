@@ -18,7 +18,7 @@ const { app, cleanup } = await loadApp("imap-uidplus");
 test.after(cleanup);
 
 const BASE = "http://mailflare.local";
-const AUTH = "IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS";
+const AUTH = "IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS IDLE";
 const SHARED = { userId: "user-b", mailboxId: "mbx-s", address: "sales@example.test" };
 const texts = (result) => result.untagged.map((unit) => unit.text);
 const sql = (context, query, ...params) => context.database.db.prepare(query).all(...params);
@@ -190,7 +190,7 @@ test("a5.3: UIDPLUS is advertised after authentication only; UID EXPUNGE needs a
 	const append = await client.collect("ap");
 	assertTagged(append, "NO", /CANNOT/);
 	assert.ok(!append.tagged.includes("APPENDUID"));
-	for (const command of ["IDLE", "ENABLE CONDSTORE", "ENABLE QRESYNC"]) assertTagged(await client.command(command), "BAD", /Unknown command/, command);
+	for (const command of ["ENABLE CONDSTORE", "ENABLE QRESYNC"]) assertTagged(await client.command(command), "BAD", /Unknown command/, command);
 	assertTagged(await client.command("FETCH 1 (MODSEQ)"), "BAD");
 	assertTagged(await client.command("UID FETCH 1 (FLAGS) (CHANGEDSINCE 1)"), "BAD");
 	assertTagged(await client.command("STATUS INBOX (HIGHESTMODSEQ)"), "BAD");

@@ -135,10 +135,10 @@ test("a5.2b/a5.3: MOVE and UIDPLUS are advertised after authentication only; mal
 	assert.deepEqual(texts(await client.command("CAPABILITY")), ["* CAPABILITY IMAP4rev1 SASL-IR AUTH=PLAIN ID"]);
 	assertTagged(await client.command("MOVE 1 Trash"), "BAD", /not valid in this state/);
 	const { credential } = await context.credential("user-a", "mbx-a");
-	assertTagged(await client.login("a@example.test", credential), "OK", /\[CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS\]/);
+	assertTagged(await client.login("a@example.test", credential), "OK", /\[CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS IDLE\]/);
 	const capability = texts(await client.command("CAPABILITY"))[0];
-	assert.equal(capability, "* CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS");
-	for (const absent of ["IDLE", "CONDSTORE", "QRESYNC", "LITERAL+"]) assert.ok(!capability.split(" ").includes(absent), absent);
+	assert.equal(capability, "* CAPABILITY IMAP4rev1 ID NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS IDLE");
+	for (const absent of ["CONDSTORE", "QRESYNC", "LITERAL+"]) assert.ok(!capability.split(" ").includes(absent), absent);
 	assertTagged(await client.command("MOVE 1 Trash"), "BAD", /not valid in this state/, "authenticated but nothing selected");
 	assertTagged(await client.command("UID MOVE 1 Trash"), "BAD", /not valid in this state/);
 
