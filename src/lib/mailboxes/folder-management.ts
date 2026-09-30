@@ -103,9 +103,29 @@ export async function findFolder(db: AppDatabase, mailboxId: string, folderId: s
 	return folder ?? null;
 }
 
-async function nameTaken(db: AppDatabase, mailboxId: string, name: string, exceptFolderId?: string): Promise<boolean> {
-	const [row] = await db.select({ id: folders.id }).from(folders).where(and(eq(folders.mailboxId, mailboxId), eq(folders.name, name))).limit(1);
-	return !!row && row.id !== exceptFolderId;
+/**
+ * Whether another folder of the mailbox already has `name`: exactly, or with `strict` also up to
+ * ASCII case (SQLite's lower()), the check the strict guard below makes in SQL.
+ */
+async function nameTaken(db: AppDatabase, mailboxId: string, name: string, exceptFolderId?: string, strict = false): Promise<boolean> {
+	const same = strict ? sql`lower(${folders.name}) = lower(${name})` : eq(folders.name, name);
+	const rows = await db.select({ id: folders.id }).from(folders).where(and(eq(folders.mailboxId, mailboxId), same)).limit(2);
+	return rows.some((row) => row.id !== exceptFolderId);
+}
+
+/**
+ * Strict naming (IMAP, A5.5a): the name must also be free up to ASCII case, checked inside the
+ * write so two sessions cannot both take `Foo` and `foo`. Case differences outside ASCII and
+ * Unicode normalization are the caller's policy (imapFolderNameVerdict); a race between such
+ * variants stays possible without a schema constraint, and IMAP's listing disambiguates it.
+ */
+export type FolderNameOptions = { strictNames?: boolean };
+
+function nameFree(alias: string, mailboxId: string, name: string, strict: boolean, exceptFolderId?: string): SQL {
+	const other = sql.raw(alias);
+	const same = strict ? sql`(${other}.name = ${name} OR lower(${other}.name) = lower(${name}))` : sql`${other}.name = ${name}`;
+	const except = exceptFolderId === undefined ? sql`` : sql`AND ${other}.id <> ${exceptFolderId}`;
+	return sql`NOT EXISTS (SELECT 1 FROM folders AS ${other} WHERE ${other}.mailbox_id = ${mailboxId} AND ${same} ${except})`;
 }
 
 function isUniqueViolation(error: unknown): boolean {
@@ -116,14 +136,16 @@ function isUniqueViolation(error: unknown): boolean {
 /**
  * Create a custom folder named `name` in `mailboxId`. Exact duplicates are refused
  * (`alreadyExists`); names differing only in case or Unicode normalization, or equal to a system
- * folder's, are accepted as before (A5.5 decides those).
+ * folder's, are accepted (JMAP, web). With `strictNames` (IMAP) a name equal up to ASCII case is
+ * `alreadyExists` too, decided inside the insert.
  */
-export async function createFolder(db: AppDatabase, actor: FolderActor, mailboxId: string, name: unknown): Promise<CreateFolderResult> {
+export async function createFolder(db: AppDatabase, actor: FolderActor, mailboxId: string, name: unknown, options: FolderNameOptions = {}): Promise<CreateFolderResult> {
+	const strict = options.strictNames === true;
 	const authorized = await authorize(db, actor, mailboxId);
 	if (authorized !== "ok") return { outcome: authorized };
 	const normalized = normalizeFolderName(name);
 	if (normalized === null) return { outcome: "invalidName" };
-	if (await nameTaken(db, mailboxId, normalized)) return { outcome: "alreadyExists" };
+	if (await nameTaken(db, mailboxId, normalized, undefined, strict)) return { outcome: "alreadyExists" };
 	const id = newId("fld");
 	let inserted: BatchResult[];
 	try {
@@ -134,7 +156,7 @@ export async function createFolder(db: AppDatabase, actor: FolderActor, mailboxI
 				FROM mailboxes
 				WHERE mailboxes.id = ${mailboxId}
 					AND ${managementGuard(actor, mailboxId)}
-					AND NOT EXISTS (SELECT 1 FROM folders WHERE folders.mailbox_id = ${mailboxId} AND folders.name = ${normalized})
+					AND ${nameFree("existing", mailboxId, normalized, strict)}
 				RETURNING id
 			`,
 		]);
@@ -144,12 +166,13 @@ export async function createFolder(db: AppDatabase, actor: FolderActor, mailboxI
 	}
 	if (inserted[0].results.length) return { outcome: "ok", folderId: id, name: normalized };
 	// Nothing written: a folder of that name appeared, or authority went away meanwhile.
-	if (await nameTaken(db, mailboxId, normalized)) return { outcome: "alreadyExists" };
+	if (await nameTaken(db, mailboxId, normalized, undefined, strict)) return { outcome: "alreadyExists" };
 	return { outcome: settledRefusal(await authorize(db, actor, mailboxId)) };
 }
 
-/** Rename custom folder `folderId` of `mailboxId` to `name`. Validation and duplicates as in createFolder. */
-export async function renameFolder(db: AppDatabase, actor: FolderActor, mailboxId: string, folderId: string, name: unknown): Promise<RenameFolderResult> {
+/** Rename custom folder `folderId` of `mailboxId` to `name`. Validation, duplicates and `strictNames` as in createFolder. */
+export async function renameFolder(db: AppDatabase, actor: FolderActor, mailboxId: string, folderId: string, name: unknown, options: FolderNameOptions = {}): Promise<RenameFolderResult> {
+	const strict = options.strictNames === true;
 	const authorized = await authorize(db, actor, mailboxId);
 	if (authorized !== "ok") return { outcome: authorized };
 	const folder = await findFolder(db, mailboxId, folderId);
@@ -157,7 +180,7 @@ export async function renameFolder(db: AppDatabase, actor: FolderActor, mailboxI
 	const normalized = normalizeFolderName(name);
 	if (normalized === null) return { outcome: "invalidName" };
 	if (normalized === folder.name) return { outcome: "unchanged", name: normalized };
-	if (await nameTaken(db, mailboxId, normalized, folderId)) return { outcome: "alreadyExists" };
+	if (await nameTaken(db, mailboxId, normalized, folderId, strict)) return { outcome: "alreadyExists" };
 	let renamed: BatchResult[];
 	try {
 		renamed = await batchSql(db, [
@@ -165,7 +188,7 @@ export async function renameFolder(db: AppDatabase, actor: FolderActor, mailboxI
 				UPDATE folders SET name = ${normalized}
 				WHERE folders.id = ${folderId} AND folders.mailbox_id = ${mailboxId}
 					AND ${managementGuard(actor, mailboxId)}
-					AND NOT EXISTS (SELECT 1 FROM folders AS other WHERE other.mailbox_id = ${mailboxId} AND other.name = ${normalized} AND other.id <> ${folderId})
+					AND ${nameFree("other", mailboxId, normalized, strict, folderId)}
 				RETURNING id
 			`,
 		]);
@@ -175,7 +198,7 @@ export async function renameFolder(db: AppDatabase, actor: FolderActor, mailboxI
 	}
 	if (renamed[0].results.length) return { outcome: "ok", name: normalized };
 	if (!(await findFolder(db, mailboxId, folderId))) return { outcome: "notFound" };
-	if (await nameTaken(db, mailboxId, normalized, folderId)) return { outcome: "alreadyExists" };
+	if (await nameTaken(db, mailboxId, normalized, folderId, strict)) return { outcome: "alreadyExists" };
 	return { outcome: settledRefusal(await authorize(db, actor, mailboxId)) };
 }
 

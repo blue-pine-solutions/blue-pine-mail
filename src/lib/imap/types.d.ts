@@ -42,6 +42,8 @@ export type ImapMailbox = {
 	key: ImapFolderKey;
 	/** Unique within the mailbox; `INBOX` for the inbox. Hierarchy and encoding are the listener's concern. */
 	name: string;
+	/** A custom folder's name as stored (`name` may carry a disambiguating ` (n)`); null for system folders. */
+	storedName: string | null;
 	role: ImapSystemRole | null;
 	specialUse: ImapSpecialUse | null;
 	folderId: string | null;

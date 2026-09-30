@@ -181,7 +181,7 @@ test("a5.3: UIDPLUS is advertised after authentication only; UID EXPUNGE needs a
 	await client.command("SELECT INBOX");
 	assert.deepEqual(texts(await client.command("CAPABILITY")), [`* CAPABILITY ${AUTH}`], "the same in the selected state");
 	const before = state(context);
-	for (const command of ["COPY 1 Trash", "UID COPY 1 Trash", 'CREATE "New"', "DELETE Work", "RENAME Work Play", "SUBSCRIBE Work", "UNSUBSCRIBE Work"]) {
+	for (const command of ["COPY 1 Trash", "UID COPY 1 Trash"]) {
 		assertTagged(await client.command(command), "NO", /\[CANNOT\] .* not available on this server/, command);
 	}
 	client.write("ap APPEND Drafts (\\Seen) {12}\r\n");

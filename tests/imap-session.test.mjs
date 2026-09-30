@@ -342,7 +342,7 @@ test("gate3: a UIDVALIDITY change or a vanished selected folder ends the session
 	assert.equal(gone.untagged.at(-1).text, "* BYE Selected mailbox no longer exists");
 });
 
-test("gate3: every mutating command other than STORE, EXPUNGE, UID EXPUNGE, CLOSE and MOVE is refused without touching A3 or product state", async (t) => {
+test("gate3: COPY and APPEND, the mutating commands not yet implemented, are refused without touching A3 or product state", async (t) => {
 	const context = await loggedIn(t);
 	await context.deliver("m-1", "Subject: x\r\n\r\nx\r\n");
 	await context.client.command("SELECT INBOX");
@@ -354,8 +354,8 @@ test("gate3: every mutating command other than STORE, EXPUNGE, UID EXPUNGE, CLOS
 	]);
 	const before = state();
 	// STORE is certified in imap-flags.test.mjs, EXPUNGE and CLOSE in imap-expunge.test.mjs, MOVE in imap-move.test.mjs,
-	// UID EXPUNGE in imap-uidplus.test.mjs.
-	for (const command of ["COPY 1 Trash", "UID COPY 1 Trash", 'CREATE "New"', "DELETE Work", "RENAME Work Play", "SUBSCRIBE Work", "UNSUBSCRIBE Work"]) {
+	// UID EXPUNGE in imap-uidplus.test.mjs, CREATE/RENAME/DELETE/SUBSCRIBE/UNSUBSCRIBE in imap-mailbox-management.test.mjs.
+	for (const command of ["COPY 1 Trash", "UID COPY 1 Trash"]) {
 		assertTagged(await context.client.command(command), "NO", /\[CANNOT\] .* not available on this server/);
 	}
 	context.client.write("ap APPEND INBOX (\\Seen) {12}\r\n");

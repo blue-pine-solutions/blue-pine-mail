@@ -701,6 +701,22 @@ try {
 	await sql(["UPDATE mail_app_passwords SET scopes = '[\"imap\"]' WHERE id = 'map-p'"]);
 	check("a credential actor creates a folder in its own mailbox", (await op("folders.createFolder", rCredential, "mbx-p", "Via credential")).outcome === "ok");
 
+	console.log("Strict IMAP folder names (A5.5a, D1)");
+	const strict = { strictNames: true };
+	const sCreated = await op("folders.createFolder", rOwner, "mbx-r", "Strict One", strict);
+	check("strict create of a unique name", sCreated.outcome === "ok", sCreated);
+	check("strict create of an ASCII case variant is alreadyExists (lower() on D1); the default mode still allows it", (await op("folders.createFolder", rOwner, "mbx-r", "STRICT ONE", strict)).outcome === "alreadyExists" && (await op("folders.createFolder", rOwner, "mbx-r", "strict one")).outcome === "ok");
+	const caseRace = await Promise.all([op("folders.createFolder", rOwner, "mbx-r", "Race", strict), op("folders.createFolder", rOwner, "mbx-r", "RACE", strict)]);
+	check("two concurrent strict creates of case variants: exactly one folder", caseRace.filter((result) => result.outcome === "ok").length === 1 && caseRace.filter((result) => result.outcome === "alreadyExists").length === 1 && (await sql(["SELECT COUNT(*) AS n FROM folders WHERE mailbox_id = 'mbx-r' AND lower(name) = 'race'"]))[0][0].n === 1, caseRace);
+	check("strict rename to a unique name, and to an ASCII case variant of another folder refused", (await op("folders.renameFolder", rOwner, "mbx-r", sCreated.folderId, "Strict Renamed", strict)).outcome === "ok" && (await op("folders.renameFolder", rOwner, "mbx-r", sCreated.folderId, "race", strict)).outcome === "alreadyExists");
+	check("strict rename of a folder to its own case variant", (await op("folders.renameFolder", rOwner, "mbx-r", sCreated.folderId, "STRICT RENAMED", strict)).outcome === "ok");
+	await sql(["UPDATE mailbox_access SET permission = 'read_only' WHERE id = 'acc-r'"]);
+	check("the authority guard still applies in strict mode", (await op("folders.createFolder", rDelegate, "mbx-r", "Delegate", strict)).outcome === "forbidden" && (await op("folders.renameFolder", rDelegate, "mbx-r", sCreated.folderId, "Delegate", strict)).outcome === "forbidden");
+	await sql(["INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, status, folder_id, snoozed_until, created_at) VALUES ('s-z', 'user-a', 'mbx-r', 'inbound', 's@x', 'r1@example.test', 'received', ?, 1999999999, 40002)", sCreated.folderId]);
+	const sDeleted = await op("folders.deleteFolder", rOwner, "mbx-r", sCreated.folderId, { removeMessages: true });
+	const sMessage = (await sql(["SELECT status, folder_id, snoozed_until FROM messages WHERE id = 's-z'"]))[0][0];
+	check("IMAP DELETE's removal moves the snoozed message to Trash and deletes the folder in one scoped batch", same(sDeleted, { outcome: "ok", movedToTrash: 1 }) && sMessage.status === "trash" && sMessage.folder_id === null, [sDeleted, sMessage]);
+
 	console.log("bp0004 upgrade of an existing D1 database (Workers runner)");
 	const draftTriggers = (await sql(["SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'bp_imap_draft_%' ORDER BY name"]))[0];
 	await sql(...draftTriggers.map((trigger) => [`DROP TRIGGER ${trigger.name}`]), ["DELETE FROM d1_migrations WHERE name = 'bp0004_release_imap_draft_uid_on_content_change.sql'"]);

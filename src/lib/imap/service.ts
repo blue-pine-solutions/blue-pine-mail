@@ -136,6 +136,7 @@ async function listMailboxes(db: AppDatabase, access: ImapAccess, allowed: Delet
 		...SYSTEM_FOLDERS.map((folder): ImapMailbox => ({
 			key: folder.role,
 			name: folder.name,
+			storedName: null,
 			role: folder.role,
 			specialUse: folder.specialUse,
 			folderId: null,
@@ -148,6 +149,7 @@ async function listMailboxes(db: AppDatabase, access: ImapAccess, allowed: Delet
 		...custom.map((folder): ImapMailbox => ({
 			key: customFolderKey(folder.id),
 			name: names.get(folder.id)!,
+			storedName: folder.name,
 			role: null,
 			specialUse: null,
 			folderId: folder.id,

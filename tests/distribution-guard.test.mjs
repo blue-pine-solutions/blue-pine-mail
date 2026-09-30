@@ -234,7 +234,12 @@ test("the IMAP state layer, flag writes included, stays Workers/D1-safe", () => 
 	assert.match(session, /const copyUid = copyUidData\(result\.moved\);/);
 	assert.doesNotMatch(session, /\[APPENDUID/);
 	assert.match(session.match(/export const AUTH_CAPABILITIES = "([^"]*)"/)[1], /(^| )UIDPLUS( |$)/);
-	assert.match(session, /const UNSUPPORTED_COMMANDS = new Set\(\["COPY", "APPEND", "CREATE", "DELETE", "RENAME", "SUBSCRIBE", "UNSUBSCRIBE"\]\);/);
+	assert.match(session, /const UNSUPPORTED_COMMANDS = new Set\(\["COPY", "APPEND"\]\);/);
+	// Mailbox management (A5.5a) goes through the R-1 service only; the engine never writes folders itself.
+	assert.doesNotMatch(session, /insert\(folders\)|update\(folders\)|delete\(folders\)|FROM folders|INTO folders/);
+	assert.match(session, /createFolder\(db, actor, mailboxId, name, \{ strictNames: true \}\)/);
+	assert.match(session, /renameFolder\(db, actor, mailboxId, source\.folderId!, name, \{ strictNames: true \}\)/);
+	assert.match(session, /deleteFolder\(db, actor, mailboxId, target\.folderId!, \{ removeMessages: true \}\)/);
 	// IDLE (A5.4): the database is its only source of truth. Neither the engine nor the listener
 	// may consult the process-local realtime hub, and only the listener polls the change signal.
 	assert.match(session.match(/export const AUTH_CAPABILITIES = "([^"]*)"/)[1], /(^| )IDLE( |$)/);

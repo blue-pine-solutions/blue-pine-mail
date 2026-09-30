@@ -2,13 +2,14 @@ import { getDb } from "@/db";
 import { authorizeImapAccess } from "@/lib/imap/access";
 import { expungeImapFolder, fetchImapMessage, getImapChangeSignal, getImapFolderStatus, listImapMailboxes, moveImapMessages, openImapFolder, storeImapFlags, trainImapSpamFeedback } from "@/lib/imap/service";
 import type { ImapFlagName, ImapFlags, ImapFolderSnapshot, ImapMailbox, ImapMoveResult } from "@/lib/imap/types";
-import { ImapStateError, STORABLE_FLAGS } from "@/lib/imap/utils";
+import { ambiguousFolderIds, ImapStateError, imapFolderNameVerdict, STORABLE_FLAGS } from "@/lib/imap/utils";
 import { verifyMailAppPassword } from "@/lib/mail-app-passwords/verify";
+import { createFolder, deleteFolder, renameFolder } from "@/lib/mailboxes/folder-management";
 import { binaryToUtf8 } from "./bytes-utils";
 import { formatFlags, MessageView, needsContent, writeFetchResponse } from "./fetch";
 import { readFetchItems } from "./fetch-parser";
 import { CommandFramer } from "./framer";
-import { findMailbox, listMatcher, SPECIAL_USE_ATTRIBUTE, wireName } from "./mailbox-names";
+import { decodeMailboxName, findMailbox, isInboxName, listMatcher, SPECIAL_USE_ATTRIBUTE, wireName } from "./mailbox-names";
 import { metadataKey, sharedMetadataCache, type MetadataCache } from "./metadata-cache";
 import { CommandReader, ImapSyntaxError } from "./reader";
 import { line, ResponseBuilder, responseText } from "./response";
@@ -44,8 +45,10 @@ import type { FetchItem, FramedItem, FramerLimits, ImapSessionHost, SelectedMail
  * - MOVE and UID MOVE (A5.2b, RFC 6851): A3's moveImapMessages, under its special-folder
  *   policy, then the spam training a move into or out of Spam stands for; with UIDPLUS (A5.3)
  *   a committed move reports COPYUID from the destination UIDs the database allocated.
- * Every other command that would write (COPY, APPEND, folder management) is refused before
- * any storage call. UIDPLUS's APPENDUID and COPYUID for COPY are owed only by a successful
+ * - CREATE, RENAME and DELETE (A5.5a) through the R-1 folder-management service, with a strict
+ *   IMAP naming policy and DELETE moving the folder's messages to Trash; SUBSCRIBE and
+ *   UNSUBSCRIBE are compatibility answers over "every visible mailbox is subscribed".
+ * COPY and APPEND are refused before any storage call. UIDPLUS's APPENDUID and COPYUID for COPY are owed only by a successful
  * APPEND or COPY, which do not exist yet.
  *
  * IDLE (A5.4, RFC 2177) waits for DONE while polling the database, never a process-local
@@ -94,7 +97,7 @@ export const AUTH_FAILURE_DELAY_MS = 1000;
 const SELECTED_FLAGS = "(\\Seen \\Flagged \\Deleted \\Draft)";
 const PERMANENT_FLAG_NAMES: Record<ImapFlagName, string> = { seen: "\\Seen", flagged: "\\Flagged", deleted: "\\Deleted" };
 /** Commands that would write and are not available; refused before any storage call. */
-const UNSUPPORTED_COMMANDS = new Set(["COPY", "APPEND", "CREATE", "DELETE", "RENAME", "SUBSCRIBE", "UNSUBSCRIBE"]);
+const UNSUPPORTED_COMMANDS = new Set(["COPY", "APPEND"]);
 const STATUS_ITEMS = new Set(["MESSAGES", "RECENT", "UIDNEXT", "UIDVALIDITY", "UNSEEN"]);
 const MAX_ID_PAIRS = 30;
 
@@ -379,6 +382,15 @@ export class ImapSession {
 			case "IDLE":
 				reader.end();
 				return this.idle(tag);
+			case "CREATE":
+				return this.create(tag, reader);
+			case "RENAME":
+				return this.rename(tag, reader);
+			case "DELETE":
+				return this.delete(tag, reader);
+			case "SUBSCRIBE":
+			case "UNSUBSCRIBE":
+				return this.subscribe(tag, reader, command === "SUBSCRIBE");
 			case "LOGIN":
 			case "AUTHENTICATE":
 				return this.wrongState(tag);
@@ -425,7 +437,7 @@ export class ImapSession {
 	}
 
 	private isKnown(command: string): boolean {
-		return ["LIST", "LSUB", "STATUS", "SELECT", "EXAMINE", "NAMESPACE", "CHECK", "CLOSE", "UNSELECT", "FETCH", "UID FETCH", "SEARCH", "UID SEARCH", "LOGIN", "AUTHENTICATE", "STORE", "UID STORE", "COPY", "UID COPY", "MOVE", "UID MOVE", "EXPUNGE", "UID EXPUNGE", "IDLE", ...UNSUPPORTED_COMMANDS].includes(command);
+		return ["LIST", "LSUB", "STATUS", "SELECT", "EXAMINE", "NAMESPACE", "CHECK", "CLOSE", "UNSELECT", "FETCH", "UID FETCH", "SEARCH", "UID SEARCH", "LOGIN", "AUTHENTICATE", "STORE", "UID STORE", "COPY", "UID COPY", "MOVE", "UID MOVE", "EXPUNGE", "UID EXPUNGE", "IDLE", "CREATE", "RENAME", "DELETE", "SUBSCRIBE", "UNSUBSCRIBE", ...UNSUPPORTED_COMMANDS].includes(command);
 	}
 
 	// ---- any state --------------------------------------------------------------
@@ -608,6 +620,165 @@ export class ImapSession {
 		const values: Record<string, number> = { MESSAGES: status.messages, RECENT: 0, UIDNEXT: status.uidNext, UIDVALIDITY: status.uidValidity, UNSEEN: status.unseen };
 		await this.host.write(new ResponseBuilder().raw("* STATUS ").string(wireName(mailbox)).raw(` (${items.map((item) => `${item} ${values[item]}`).join(" ")})\r\n`).bytes());
 		await this.send(`${tag} OK STATUS completed`);
+	}
+
+	// ---- mailbox management (A5.5a) ---------------------------------------------
+
+	/**
+	 * CREATE, RENAME and DELETE change custom folders through the R-1 folder-management service,
+	 * which decides authority (owner, or full_access delegate while sharing is enabled; the mail
+	 * app password must still exist with the `imap` scope) and repeats it inside the write. This
+	 * layer only resolves names and maps outcomes:
+	 *
+	 * - New names are decoded from modified UTF-7 and must pass the strict IMAP policy
+	 *   (imapFolderNameVerdict): an existing name, a system folder's or INBOX is ALREADYEXISTS; a
+	 *   case- or NFC-variant of one, a `<base> (<n>)` shape whose base collides, `*`, `%` or an
+	 *   invalid name is CANNOT. The service's strict mode repeats the ASCII case check in SQL.
+	 * - A folder to rename or delete is resolved to its id from the current listing, and refused
+	 *   (CANNOT) when it is a system folder or its listed name could shift to another folder
+	 *   (ambiguousFolderIds): nothing is ever changed through an unstable name.
+	 * - DELETE moves the folder's messages to Trash (snoozed ones included) and deletes it, in
+	 *   one guarded batch; the folder this session has selected is INUSE.
+	 */
+	private manager() {
+		const principal = this.principal!;
+		return { db: getDb(this.env), actor: { userId: principal.userId, appPasswordId: principal.appPasswordId }, mailboxId: principal.mailboxId };
+	}
+
+	private static customFolders(mailboxes: ImapMailbox[]): Array<{ id: string; name: string }> {
+		return mailboxes.filter((mailbox) => mailbox.folderId !== null).map((mailbox) => ({ id: mailbox.folderId!, name: mailbox.storedName! }));
+	}
+
+	/** The refusal for a name that may not become a folder's (or null when it may), excluding folder `except`. */
+	private static nameRefusal(name: string, mailboxes: ImapMailbox[], except?: string): string | null {
+		const verdict = imapFolderNameVerdict(name, ImapSession.customFolders(mailboxes).filter((folder) => folder.id !== except));
+		if (verdict === "invalid") return "NO [CANNOT] Invalid mailbox name";
+		if (verdict === "exists") return "NO [ALREADYEXISTS] Mailbox already exists";
+		if (verdict === "collides") return "NO [CANNOT] Mailbox name is too similar to an existing mailbox's";
+		return null;
+	}
+
+	/** Why a listed mailbox may not be renamed or deleted over IMAP, or null when it may. */
+	private static unmanageable(mailboxes: ImapMailbox[], mailbox: ImapMailbox, action: string): string | null {
+		if (mailbox.folderId === null) return `NO [CANNOT] System mailboxes cannot be ${action}`;
+		if (ambiguousFolderIds(ImapSession.customFolders(mailboxes)).has(mailbox.folderId)) return `NO [CANNOT] This folder's name collides with another mailbox's; it cannot be ${action} over IMAP until that is resolved`;
+		return null;
+	}
+
+	/**
+	 * The service answered notFound: the folder went away, or the principal's own access did
+	 * (credential or scope revoked, access removed, user or mailbox disabled, sharing off). The
+	 * latter ends the session, as lost access does everywhere.
+	 */
+	private async nonexistentUnlessAccessLost(tag: string): Promise<void> {
+		if (!(await authorizeImapAccess(getDb(this.env), this.principal!))) throw new ImapStateError("forbidden", "Mailbox access denied");
+		return this.send(`${tag} NO [NONEXISTENT] No such mailbox`);
+	}
+
+	/** The service found the name taken at write time: exactly (ALREADYEXISTS) or by a case variant (CANNOT). */
+	private async takenAnswer(tag: string, name: string, except?: string): Promise<void> {
+		return this.send(`${tag} ${ImapSession.nameRefusal(name, await this.mailboxes(), except) ?? "NO [CANNOT] Mailbox name is too similar to an existing mailbox's"}`);
+	}
+
+	private async create(tag: string, reader: CommandReader): Promise<void> {
+		reader.sp();
+		const requested = reader.astring();
+		reader.end();
+		if (isInboxName(requested)) return this.send(`${tag} NO [ALREADYEXISTS] Mailbox already exists`);
+		const name = decodeMailboxName(requested);
+		if (name === null) return this.send(`${tag} NO [CANNOT] Invalid mailbox name`);
+		const refusal = ImapSession.nameRefusal(name, await this.mailboxes());
+		if (refusal) return this.send(`${tag} ${refusal}`);
+		const { db, actor, mailboxId } = this.manager();
+		const result = await createFolder(db, actor, mailboxId, name, { strictNames: true });
+		switch (result.outcome) {
+			case "ok":
+				return this.send(`${tag} OK CREATE completed`);
+			case "forbidden":
+				return this.send(`${tag} NO [NOPERM] This access does not allow managing folders`);
+			case "invalidName":
+				return this.send(`${tag} NO [CANNOT] Invalid mailbox name`);
+			case "alreadyExists":
+				return this.takenAnswer(tag, name);
+			case "notFound":
+				return this.nonexistentUnlessAccessLost(tag);
+		}
+	}
+
+	private async rename(tag: string, reader: CommandReader): Promise<void> {
+		reader.sp();
+		const from = reader.astring();
+		reader.sp();
+		const to = reader.astring();
+		reader.end();
+		const mailboxes = await this.mailboxes();
+		const source = findMailbox(mailboxes, from);
+		if (!source) return this.send(`${tag} NO [NONEXISTENT] No such mailbox`);
+		const blocked = ImapSession.unmanageable(mailboxes, source, "renamed");
+		if (blocked) return this.send(`${tag} ${blocked}`);
+		if (isInboxName(to)) return this.send(`${tag} NO [ALREADYEXISTS] Mailbox already exists`);
+		const name = decodeMailboxName(to);
+		if (name === null) return this.send(`${tag} NO [CANNOT] Invalid mailbox name`);
+		if (name === source.storedName) return this.send(`${tag} NO [ALREADYEXISTS] Mailbox already exists`);
+		const refusal = ImapSession.nameRefusal(name, mailboxes, source.folderId!);
+		if (refusal) return this.send(`${tag} ${refusal}`);
+		const { db, actor, mailboxId } = this.manager();
+		const result = await renameFolder(db, actor, mailboxId, source.folderId!, name, { strictNames: true });
+		switch (result.outcome) {
+			case "ok":
+				// A selected folder stays selected: the selection is keyed by folder id, not name.
+				return this.send(`${tag} OK RENAME completed`);
+			case "unchanged":
+				return this.send(`${tag} NO [ALREADYEXISTS] Mailbox already exists`);
+			case "forbidden":
+				return this.send(`${tag} NO [NOPERM] This access does not allow managing folders`);
+			case "invalidName":
+				return this.send(`${tag} NO [CANNOT] Invalid mailbox name`);
+			case "alreadyExists":
+				return this.takenAnswer(tag, name, source.folderId!);
+			case "notFound":
+				return this.nonexistentUnlessAccessLost(tag);
+		}
+	}
+
+	private async delete(tag: string, reader: CommandReader): Promise<void> {
+		reader.sp();
+		const requested = reader.astring();
+		reader.end();
+		const mailboxes = await this.mailboxes();
+		const target = findMailbox(mailboxes, requested);
+		if (!target) return this.send(`${tag} NO [NONEXISTENT] No such mailbox`);
+		const blocked = ImapSession.unmanageable(mailboxes, target, "deleted");
+		if (blocked) return this.send(`${tag} ${blocked}`);
+		if (this.selected?.key === target.key) return this.send(`${tag} NO [INUSE] The mailbox is selected in this session`);
+		const { db, actor, mailboxId } = this.manager();
+		const result = await deleteFolder(db, actor, mailboxId, target.folderId!, { removeMessages: true });
+		switch (result.outcome) {
+			case "ok":
+				return this.send(`${tag} OK DELETE completed`);
+			case "forbidden":
+				return this.send(`${tag} NO [NOPERM] This access does not allow managing folders`);
+			case "hasMessages":
+				// Only possible through messages of another mailbox still filed there (R-1 refuses to touch those).
+				return this.send(`${tag} NO [CANNOT] The mailbox cannot be deleted right now`);
+			case "notFound":
+				return this.nonexistentUnlessAccessLost(tag);
+		}
+	}
+
+	/**
+	 * SUBSCRIBE and UNSUBSCRIBE (A5.5a compatibility): there is no stored subscription state and
+	 * every visible mailbox is subscribed (LSUB lists them all). SUBSCRIBE of a visible mailbox is
+	 * therefore true and OK; UNSUBSCRIBE cannot take effect and says so. Reading the mailbox is
+	 * enough (a preference, not a change to the mailbox); nothing is written.
+	 */
+	private async subscribe(tag: string, reader: CommandReader, subscribe: boolean): Promise<void> {
+		reader.sp();
+		const requested = reader.astring();
+		reader.end();
+		if (!findMailbox(await this.mailboxes(), requested)) return this.send(`${tag} NO [NONEXISTENT] No such mailbox`);
+		if (subscribe) return this.send(`${tag} OK SUBSCRIBE completed`);
+		return this.send(`${tag} NO [CANNOT] All mailboxes are always subscribed`);
 	}
 
 	private async select(tag: string, reader: CommandReader, command: string): Promise<void> {

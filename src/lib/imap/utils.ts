@@ -1,3 +1,4 @@
+import { normalizeFolderName } from "@/lib/mailboxes/folder-management-utils";
 import type { ImapFlagName, ImapFlags, ImapFolderKey, ImapMoveTarget, ImapSpecialUse, ImapStateErrorCode, ImapSystemRole } from "./types";
 
 /**
@@ -153,6 +154,63 @@ export function customFolderNames(folders: Array<{ id: string; name: string }>):
 		names.set(folder.id, name);
 	}
 	return names;
+}
+
+/**
+ * A5.5a: the strict naming policy of IMAP mailbox management. The product's own folder names
+ * (web, JMAP) may differ only in case or Unicode normalization, or equal a system folder's; IMAP
+ * then lists the later ones with a ` (n)` suffix (customFolderNames), and that suffix can move to
+ * another folder when a folder of the group is deleted. So IMAP never creates such a name, and
+ * never renames or deletes a folder whose listed name could shift.
+ */
+
+/** The key two names collide under: Unicode NFC, then lowercase (customFolderNames folds case too). */
+export function foldMailboxName(name: string): string {
+	return name.normalize("NFC").toLowerCase();
+}
+
+/** `<base> (<n>)`, the shape customFolderNames gives a colliding name. */
+const DISAMBIGUATED_NAME = /^(.*) \((\d+)\)$/;
+
+/**
+ * Folder ids whose listed IMAP name is not stable: a folder whose name collides (case- or
+ * NFC-folded) with another folder's or a system folder's, and a folder named like a
+ * disambiguated name whose base collides with one of those (it can take over that suffix).
+ */
+export function ambiguousFolderIds(folders: ReadonlyArray<{ id: string; name: string }>): Set<string> {
+	const counts = new Map<string, number>();
+	for (const folder of SYSTEM_FOLDERS) counts.set(foldMailboxName(folder.name), 1);
+	for (const folder of folders) {
+		const key = foldMailboxName(folder.name);
+		counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	const ambiguous = new Set<string>();
+	for (const folder of folders) {
+		const suffixed = DISAMBIGUATED_NAME.exec(folder.name);
+		if ((counts.get(foldMailboxName(folder.name)) ?? 0) > 1 || (suffixed && counts.has(foldMailboxName(suffixed[1])))) ambiguous.add(folder.id);
+	}
+	return ambiguous;
+}
+
+/**
+ * Whether `name` (a decoded mailbox name) may become a folder's name through IMAP CREATE or
+ * RENAME, given the mailbox's folders (excluding the folder being renamed):
+ *
+ * - `invalid`: not a valid folder name as stored (normalizeFolderName would refuse or change
+ *   it, e.g. surrounding whitespace), or it contains the LIST wildcards `*` or `%`;
+ * - `exists`: it names an existing mailbox: exactly a folder's name, a system folder's canonical
+ *   name, or INBOX in any case;
+ * - `collides`: it differs from an existing folder's or a system folder's name only in case or
+ *   Unicode normalization, or has the `<base> (<n>)` shape with a colliding base;
+ * - `ok` otherwise.
+ */
+export function imapFolderNameVerdict(name: string, folders: ReadonlyArray<{ name: string }>): "ok" | "invalid" | "exists" | "collides" {
+	if (name.includes("*") || name.includes("%") || normalizeFolderName(name) !== name) return "invalid";
+	if (name.toUpperCase() === "INBOX" || SYSTEM_FOLDERS.some((folder) => folder.name === name) || folders.some((folder) => folder.name === name)) return "exists";
+	const taken = new Set([...SYSTEM_FOLDERS.map((folder) => foldMailboxName(folder.name)), ...folders.map((folder) => foldMailboxName(folder.name))]);
+	const suffixed = DISAMBIGUATED_NAME.exec(name);
+	if (taken.has(foldMailboxName(name)) || (suffixed && taken.has(foldMailboxName(suffixed[1])))) return "collides";
+	return "ok";
 }
 
 export function nowSeconds(): number {
