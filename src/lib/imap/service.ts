@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import type { AppDatabase } from "@/db";
 import { folders, messages } from "@/db/schema";
@@ -12,6 +12,8 @@ import type {
 	ImapAccess,
 	ImapFlagChanges,
 	ImapFlagName,
+	ImapFlags,
+	ImapFlagStore,
 	ImapFolderKey,
 	ImapFolderSnapshot,
 	ImapFolderStatus,
@@ -20,7 +22,7 @@ import type {
 	ImapMessageEntry,
 	ImapPrincipal,
 } from "./types";
-import { customFolderKey, customFolderNames, flagsFor, ImapStateError, parseFolderKey, SYSTEM_FOLDERS } from "./utils";
+import { chunk, customFolderKey, customFolderNames, FLAG_STORE_CHUNK, flagsFor, ImapStateError, parseFolderKey, STORABLE_FLAGS, SYSTEM_FOLDERS } from "./utils";
 
 /**
  * Protocol-neutral IMAP mailbox state for one authenticated principal (a verified mail
@@ -313,3 +315,60 @@ export async function setImapMessageFlags(env: CloudflareEnv, principal: ImapPri
 	return entry ? flagsFor(entry.message, entry.mapping.deleted) : null;
 }
 
+/**
+ * Apply one STORE-style change to many UIDs of a folder and return the resulting flags of
+ * each UID, or null for a UID that no longer names a member of the folder.
+ *
+ * - `seen` and `flagged` are the product's `messages.read` and `messages.starred`, the same
+ *   state the web app and JMAP change, so a write here bumps the product's revision through
+ *   its own triggers. Outbound mail is always \Seen, so clearing \Seen never writes it.
+ * - Each chunk of UIDs is authorized afresh (A3's per-call rule), and each write is one
+ *   statement whose predicate is the UID mapping *and* current folder membership: a UID
+ *   whose message has moved or been deleted, however recently, changes nothing, and no UID
+ *   can reach a message outside this folder. Rows already in the target state are not
+ *   written, so a no-op STORE does not bump any revision.
+ * - Permission problems are `denied` (the principal keeps its access); lost access is
+ *   `forbidden`. \Deleted cannot be changed here yet: naming it is `denied` without
+ *   management access and `unsupported` with it, and either way nothing is written.
+ */
+export async function storeImapFlags(env: CloudflareEnv, principal: ImapPrincipal, key: ImapFolderKey, uids: number[], store: ImapFlagStore): Promise<Map<number, ImapFlags | null>> {
+	const wanted = [...new Set(uids.filter((uid) => Number.isInteger(uid) && uid >= 1))];
+	const result = new Map<number, ImapFlags | null>(wanted.map((uid) => [uid, null]));
+	const changing: ImapFlagName[] = store.mode === "replace" ? [...STORABLE_FLAGS] : STORABLE_FLAGS.filter((flag) => store.flags.includes(flag));
+	const targetOf = (flag: ImapFlagName) => (store.mode === "replace" ? store.flags.includes(flag) : store.mode === "add");
+	// An empty request still authorizes once, so a revoked principal never gets an answer.
+	for (const uidChunk of wanted.length ? chunk(wanted, FLAG_STORE_CHUNK) : [[]]) {
+		const opened = await open(env, principal, key);
+		if (store.flags.includes("deleted")) {
+			if (!opened.access.canManage) throw new ImapStateError("denied", "This access does not allow marking messages deleted");
+			throw new ImapStateError("unsupported", "\\Deleted cannot be changed on this server");
+		}
+		if (changing.some((flag) => !opened.mailbox.permanentFlags.includes(flag))) throw new ImapStateError("denied", "This access does not allow changing these flags");
+		if (!uidChunk.length) continue;
+		const folder = await findFolderRow(opened.db, opened.access.mailboxId, opened.mailbox.key);
+		if (!folder) continue;
+		const member = membershipCondition(opened.access.mailboxId, opened.mailbox.key);
+		const mapped = inArray(
+			messages.id,
+			opened.db.select({ id: imapMessageUids.messageId }).from(imapMessageUids).where(and(eq(imapMessageUids.imapFolderId, folder.id), inArray(imapMessageUids.uid, uidChunk))),
+		);
+		for (const flag of changing) {
+			const value = targetOf(flag);
+			if (flag === "seen") {
+				await opened.db
+					.update(messages)
+					.set({ read: value })
+					.where(and(mapped, member, ne(messages.read, value), value ? undefined : ne(messages.direction, "outbound")));
+			} else {
+				await opened.db.update(messages).set({ starred: value }).where(and(mapped, member, ne(messages.starred, value)));
+			}
+		}
+		const rows = await opened.db
+			.select({ uid: imapMessageUids.uid, deleted: imapMessageUids.deleted, read: messages.read, starred: messages.starred, status: messages.status, direction: messages.direction })
+			.from(imapMessageUids)
+			.innerJoin(messages, eq(messages.id, imapMessageUids.messageId))
+			.where(and(eq(imapMessageUids.imapFolderId, folder.id), inArray(imapMessageUids.uid, uidChunk), member));
+		for (const row of rows) result.set(row.uid, flagsFor(row, row.deleted));
+	}
+	return result;
+}

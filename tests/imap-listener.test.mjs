@@ -9,7 +9,7 @@ import { assertTagged, fetchAttributes, install, latin1, loadApp, makeCertificat
 
 /**
  * A4: the Node IMAP listener over real TLS sockets: TLS configuration and lifecycle,
- * per-instance limits and timeouts, and the full read-only protocol end to end, with a
+ * per-instance limits and timeouts, and the full protocol end to end, with a
  * raw client as the primary driver and Python imaplib, curl and openssl as interop checks.
  */
 const { app, cleanup } = await loadApp("imap-listener");
@@ -281,7 +281,7 @@ test("gate6: shutdown says BYE, closes every session and stops listening", async
 	assert.equal(refused.code, "ECONNREFUSED", "the port is no longer open");
 });
 
-// ---- Gate 7: the complete read-only protocol over TLS ------------------------------------------------
+// ---- Gate 7: the complete protocol over TLS ------------------------------------------------
 
 const MESSAGE = "Date: Tue, 3 Mar 2026 10:15:00 +0100\r\nFrom: =?UTF-8?Q?J=C3=BCrgen?= <j@elsewhere.test>\r\nTo: a@example.test\r\nSubject: Gr\xc3\xbc\xc3\x9fe \xe2\x9c\x93\r\nMessage-ID: <tls-1@elsewhere.test>\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nhello \xe2\x9c\x93\r\n--b\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQK\r\n--b--\r\n";
 
@@ -296,7 +296,7 @@ async function populated(t) {
 	return { ...setup, bytes, good };
 }
 
-test("gate7: an end-to-end read-only session over TLS", async (t) => {
+test("gate7: an end-to-end session over TLS", async (t) => {
 	const { listener, good, bytes, database, row } = await populated(t);
 	const { client } = await connected(listener.port);
 	assert.deepEqual((await client.command("CAPABILITY")).untagged.map((unit) => unit.text), ["* CAPABILITY IMAP4rev1 SASL-IR AUTH=PLAIN ID"]);
@@ -310,9 +310,7 @@ test("gate7: an end-to-end read-only session over TLS", async (t) => {
 	assert.deepEqual(status.untagged.map((unit) => unit.text), ['* STATUS "Caf&AOk-/&ANw-n&AO8-code" (MESSAGES 1 UNSEEN 1)']);
 	const examine = await client.command("EXAMINE INBOX");
 	assertTagged(examine, "OK", /\[READ-ONLY\]/);
-	const select = await client.command("SELECT INBOX");
-	assertTagged(select, "OK", /\[READ-ONLY\]/);
-	assert.ok(select.untagged.some((unit) => unit.text === "* OK [PERMANENTFLAGS ()] Read-only mailbox"));
+	assert.ok(examine.untagged.some((unit) => unit.text === "* OK [PERMANENTFLAGS ()] Read-only mailbox"));
 	const fetched = await client.command("FETCH 1 (UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE BODYSTRUCTURE BODY[])");
 	assertTagged(fetched, "OK");
 	assert.deepEqual(new Uint8Array(fetched.literals.at(-1)), new Uint8Array(bytes), "exact canonical octets over TLS");
@@ -323,10 +321,21 @@ test("gate7: an end-to-end read-only session over TLS", async (t) => {
 	assert.deepEqual(attributes.BODYSTRUCTURE[1].slice(0, 7), ["application", "pdf", null, null, null, "BASE64", 12]);
 	const partial = await client.command("UID FETCH 1 (BODY.PEEK[1]<0.5> BODY.PEEK[2.MIME])");
 	assert.deepEqual(partial.literals.map(latin1), ["hello", 'Content-Type: application/pdf\r\nContent-Disposition: attachment; filename="a.pdf"\r\nContent-Transfer-Encoding: base64\r\n\r\n']);
-	assert.equal(row("m-1").read, 0, "BODY[] did not mark the message read");
+	assert.equal(row("m-1").read, 0, "BODY[] under EXAMINE did not mark the message read");
 	assert.deepEqual((await client.command("SEARCH UNSEEN")).untagged.map((unit) => unit.text), ["* SEARCH 1"]);
 	assert.deepEqual((await client.command("UID SEARCH BODY hello")).untagged.map((unit) => unit.text), ["* SEARCH 1"]);
-	assertTagged(await client.command("STORE 1 +FLAGS (\\Seen)"), "NO", /CANNOT/);
+	assertTagged(await client.command("STORE 1 +FLAGS (\\Seen)"), "NO", /read-only/);
+	const select = await client.command("SELECT INBOX");
+	assertTagged(select, "OK", /\[READ-WRITE\]/);
+	assert.ok(select.untagged.some((unit) => unit.text === "* OK [PERMANENTFLAGS (\\Seen \\Flagged)] Flags permitted"));
+	const stored = await client.command("STORE 1 +FLAGS (\\Flagged)");
+	assertTagged(stored, "OK");
+	assert.deepEqual(stored.untagged.map((unit) => unit.text), ["* 1 FETCH (FLAGS (\\Flagged))"]);
+	assert.equal(row("m-1").starred, 1, "STORE over TLS changes the product's starred state");
+	const read = await client.command("FETCH 1 (BODY[TEXT])");
+	assertTagged(read, "OK");
+	assert.deepEqual(fetchAttributes(read.untagged[0].text).FLAGS, ["\\Seen", "\\Flagged"], "a non-PEEK body fetch under SELECT sets \\Seen and reports it");
+	assert.equal(row("m-1").read, 1);
 	assertTagged(await client.command("CHECK"), "OK");
 	assertTagged(await client.command("UNSELECT"), "OK");
 	assertTagged(await client.command("SELECT INBOX"), "OK");
@@ -336,7 +345,7 @@ test("gate7: an end-to-end read-only session over TLS", async (t) => {
 	assert.equal(logout.untagged[0].text, "* BYE Logging out");
 	assertTagged(logout, "OK");
 	assert.equal(await client.unit(), null);
-	assert.equal(database.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE read = 1").get().n, 1, "only the message that was already read is read");
+	assert.equal(database.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE read = 1").get().n, 2, "the message already read, and the one read under SELECT");
 });
 
 test("gate7: pipelined commands run in order and a full queue applies backpressure", async (t) => {
@@ -369,6 +378,12 @@ try:
     out["store"] = m.store("1", "+FLAGS", "\\\\Seen")[0]
 except imaplib.IMAP4.error:
     out["store"] = "raised"
+typ, data = m.select("INBOX")
+out["select_rw"] = [typ, m.response("READ-WRITE")[1] != [None]]
+typ, data = m.store("2", "+FLAGS", "(\\\\Flagged)")
+out["store_rw"] = [typ, data[0].decode()]
+typ, data = m.uid("STORE", "1", "+FLAGS.SILENT", "(\\\\Seen)")
+out["uid_store_silent"] = [typ, [x.decode() if x else None for x in data]]
 out["logout"] = m.logout()[0]
 print(json.dumps(out))
 `;
@@ -386,7 +401,10 @@ print(json.dumps(out))
 	assert.deepEqual(result.select, ["OK", "2"], "INBOX holds two messages; the third is filed in the custom folder");
 	assert.equal(result.rfc822, Buffer.from(bytes).toString("hex"), "imaplib receives the exact octets");
 	assert.equal(result.search, "1");
-	assert.ok(["NO", "raised"].includes(result.store), `STORE refused (${result.store})`);
+	assert.ok(["NO", "raised"].includes(result.store), `STORE refused under EXAMINE (${result.store})`);
+	assert.deepEqual(result.select_rw, ["OK", true], "SELECT is READ-WRITE");
+	assert.deepEqual(result.store_rw, ["OK", "2 (FLAGS (\\Seen \\Flagged))"]);
+	assert.deepEqual(result.uid_store_silent, ["OK", [null]], ".SILENT sends no FETCH");
 	assert.equal(result.logout, "BYE");
 });
 
@@ -399,9 +417,14 @@ test("gate7: curl IMAPS interoperates", { skip: !tryCommand("curl") && "curl is 
 	assert.match(listing.stdout, /\* LIST \(\\Noinferiors\) NIL "INBOX"/);
 	const message = await curl("/INBOX;UID=1");
 	assert.equal(message.stdout, Buffer.from(bytes).toString("latin1"), "curl downloads the exact canonical message");
-	assert.match((await curl("/INBOX", ["--request", "SEARCH UNSEEN"])).stdout, /^\* SEARCH 1/m);
-	const store = await curl("/INBOX", ["--request", "STORE 1 +FLAGS (\\Seen)"]);
-	assert.notEqual(store.status, 0, "curl reports the refused STORE");
+	// curl downloads with a non-PEEK BODY[] after SELECT, which sets \Seen (RFC 3501 §6.4.5).
+	assert.match((await curl("/INBOX", ["--request", "SEARCH UNSEEN"])).stdout, /^\* SEARCH\r?$/m, "the downloaded message is now seen");
+	assert.match((await curl("/INBOX", ["--request", "SEARCH SEEN"])).stdout, /^\* SEARCH 1 2\r?$/m);
+	const store = await curl("/INBOX", ["--request", "STORE 1 +FLAGS (\\Flagged)"]);
+	assert.equal(store.status, 0, store.stderr);
+	assert.match(store.stdout, /^\* 1 FETCH \(FLAGS \(\\Seen \\Flagged\)\)/m, "curl's STORE changes the flag and sees the result");
+	const refused = await curl("/INBOX", ["--request", "STORE 1 +FLAGS (\\Deleted)"]);
+	assert.notEqual(refused.status, 0, "curl reports the refused \\Deleted");
 });
 
 test("gate7: openssl s_client sees implicit TLS and the greeting", { skip: !tryCommand("openssl") && "openssl is not installed" }, async (t) => {

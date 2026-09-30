@@ -29,7 +29,7 @@ const b64 = (text) => Buffer.from(text, "latin1").toString("base64");
 
 test("gate2: greeting and CAPABILITY advertise exactly the certified set", async (t) => {
 	const { client, greeting } = await ready(t);
-	assert.equal(greeting.text, "* OK [CAPABILITY IMAP4rev1 SASL-IR AUTH=PLAIN ID] Blue Pine Solutions Mail IMAP4rev1 ready (read-only)");
+	assert.equal(greeting.text, "* OK [CAPABILITY IMAP4rev1 SASL-IR AUTH=PLAIN ID] Blue Pine Solutions Mail IMAP4rev1 ready");
 	const before = await client.command("CAPABILITY");
 	assertTagged(before, "OK");
 	assert.deepEqual(before.untagged.map((unit) => unit.text), ["* CAPABILITY IMAP4rev1 SASL-IR AUTH=PLAIN ID"]);
@@ -261,7 +261,7 @@ test("gate3: every valid folder name round-trips through modified UTF-7 without 
 	assertTagged(await context.client.command('SELECT "caf&AOk- &- co"'), "NO", /NONEXISTENT/);
 });
 
-test("gate3: SELECT and EXAMINE open the folder read-only with A3's UIDVALIDITY and UIDNEXT", async (t) => {
+test("gate3: SELECT opens the folder read-write and EXAMINE read-only, with A3's UIDVALIDITY and UIDNEXT", async (t) => {
 	const context = await loggedIn(t);
 	await context.deliver("m-1", "Subject: one\r\n\r\n1\r\n");
 	await context.deliver("m-2", "Subject: two\r\n\r\n2\r\n", { read: 1 });
@@ -269,10 +269,11 @@ test("gate3: SELECT and EXAMINE open the folder read-only with A3's UIDVALIDITY 
 	for (const command of ["SELECT", "EXAMINE"]) {
 		const result = await context.client.command(`${command} inbox`);
 		const snapshot = await app.imap.openImapFolder(context.env, { userId: "user-a", mailboxId: "mbx-a" }, "inbox");
-		assert.equal(result.tagged, `${result.tagged.split(" ")[0]} OK [READ-ONLY] ${command} completed`);
+		const writable = command === "SELECT";
+		assert.equal(result.tagged, `${result.tagged.split(" ")[0]} OK [${writable ? "READ-WRITE" : "READ-ONLY"}] ${command} completed`);
 		assert.deepEqual(texts(result), [
 			"* FLAGS (\\Seen \\Flagged \\Deleted \\Draft)",
-			"* OK [PERMANENTFLAGS ()] Read-only mailbox",
+			writable ? "* OK [PERMANENTFLAGS (\\Seen \\Flagged)] Flags permitted" : "* OK [PERMANENTFLAGS ()] Read-only mailbox",
 			"* 3 EXISTS",
 			"* 0 RECENT",
 			"* OK [UNSEEN 1] First unseen message",
@@ -341,7 +342,7 @@ test("gate3: a UIDVALIDITY change or a vanished selected folder ends the session
 	assert.equal(gone.untagged.at(-1).text, "* BYE Selected mailbox no longer exists");
 });
 
-test("gate3: every mutating command is refused without touching A3 or product state", async (t) => {
+test("gate3: every mutating command other than STORE is refused without touching A3 or product state", async (t) => {
 	const context = await loggedIn(t);
 	await context.deliver("m-1", "Subject: x\r\n\r\nx\r\n");
 	await context.client.command("SELECT INBOX");
@@ -352,8 +353,10 @@ test("gate3: every mutating command is refused without touching A3 or product st
 		context.database.db.prepare("SELECT id, name FROM folders ORDER BY id").all(),
 	]);
 	const before = state();
-	for (const command of ["STORE 1 +FLAGS (\\Seen)", "UID STORE 1 +FLAGS.SILENT (\\Deleted)", "COPY 1 Trash", "UID COPY 1 Trash", "EXPUNGE", 'CREATE "New"', "DELETE Work", "RENAME Work Play", "SUBSCRIBE Work", "UNSUBSCRIBE Work"]) {
-		assertTagged(await context.client.command(command), "NO", /\[CANNOT\] .* read-only/);
+	// STORE is certified in imap-flags.test.mjs; \Deleted is the one flag it refuses, unchanged.
+	assertTagged(await context.client.command("UID STORE 1 +FLAGS.SILENT (\\Deleted)"), "NO", /\[CANNOT\]/);
+	for (const command of ["COPY 1 Trash", "UID COPY 1 Trash", "EXPUNGE", 'CREATE "New"', "DELETE Work", "RENAME Work Play", "SUBSCRIBE Work", "UNSUBSCRIBE Work"]) {
+		assertTagged(await context.client.command(command), "NO", /\[CANNOT\] .* not available on this server/);
 	}
 	context.client.write("ap APPEND INBOX (\\Seen) {12}\r\n");
 	assert.match((await context.client.unit()).text, /^\+ /);
@@ -473,12 +476,13 @@ function lineCount(text) {
 	return text.endsWith("\n") ? breaks : breaks + 1;
 }
 
-test("gate4: BODY[], RFC822 and RFC822.SIZE are A3's canonical octets exactly; reads never set \\Seen", async (t) => {
+test("gate4: BODY[], RFC822 and RFC822.SIZE are A3's canonical octets exactly; reads under EXAMINE never set \\Seen", async (t) => {
 	const context = await loggedIn(t);
 	const complex = await context.deliver("c-1", COMPLEX);
 	const legacy = await context.deliver("l-1", LEGACY);
 	const headerOnly = await context.deliver("h-1", HEADER_ONLY);
-	await context.client.command("SELECT INBOX");
+	// Under SELECT these fetches set \Seen (imap-flags.test.mjs); EXAMINE keeps this a pure read.
+	await context.client.command("EXAMINE INBOX");
 	const owner = { userId: "user-a", mailboxId: "mbx-a" };
 	for (const [seq, bytes] of [[1, complex], [2, legacy], [3, headerOnly]]) {
 		const a3 = await app.imap.fetchImapMessage(context.env, owner, "inbox", seq);

@@ -38,6 +38,9 @@ export async function loadApp(name) {
 				export { sendEmail } from "./src/lib/email/send.ts";
 				export { POST as statusRoute } from "./src/app/api/messages/[messageId]/status/route.ts";
 				export { POST as starRoute } from "./src/app/api/messages/[messageId]/star/route.ts";
+				export { POST as readRoute } from "./src/app/api/messages/[messageId]/read/route.ts";
+				export { POST as bulkRoute } from "./src/app/api/messages/bulk/route.ts";
+				export { getUserMailRevision } from "./src/lib/realtime/revision.ts";
 				export { default as PostalMime } from "postal-mime";
 			`,
 			resolveDir: root,

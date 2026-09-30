@@ -214,6 +214,17 @@ test("the IMAP listener is Node-only: nothing the Worker compiles imports it or 
 	assert.deepEqual(starters, [join("server", "index.ts")]);
 });
 
+test("the IMAP state layer, flag writes included, stays Workers/D1-safe", () => {
+	// src/lib/imap/ is shared code: it must run on D1 (scripts/imap-state-d1-check.mjs) and never reach Node.
+	for (const file of sourceFiles(join("src", "lib", "imap"))) {
+		assert.doesNotMatch(read(file), /from\s+["']node:|\bBuffer\b|\bprocess\.|require\(/, `${file} must not use Node APIs`);
+		assert.doesNotMatch(read(file), /from\s+["'](?:@\/lib\/imap-server|[^"']*server\/runtime\/)/, `${file} must not import the listener or the Node runtime`);
+	}
+	// Writes happen only through storeImapFlags, which only the listener calls; no Worker route does.
+	const callers = [...sourceFiles("src"), "worker.ts", "worker-utils.ts"].filter((file) => /\bstoreImapFlags\(/.test(read(file)) && dirname(file) !== join("src", "lib", "imap"));
+	assert.deepEqual(callers, [join("src", "lib", "imap-server", "session.ts")]);
+});
+
 const workersBuild = join(root, "dist", "server");
 test("the Workers build output contains no IMAP listener", { skip: !existsSync(workersBuild) && "no Workers build in dist/server (run npm run build)" }, () => {
 	const files = readdirSync(workersBuild, { recursive: true }).map(String).filter((file) => /\.(m?js)$/.test(file));

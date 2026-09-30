@@ -69,6 +69,8 @@ export type SessionPrincipal = Required<Pick<ImapPrincipal, "userId" | "mailboxI
 export type SelectedMailbox = {
 	key: ImapFolderKey;
 	name: string;
+	/** EXAMINE, or a SELECT with nothing the principal may change: no STORE and no implicit \Seen. */
+	readOnly: boolean;
 	uidValidity: number;
 	uidNext: number;
 	/** UIDs by sequence number (index + 1). */

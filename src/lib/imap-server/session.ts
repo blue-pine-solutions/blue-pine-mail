@@ -1,8 +1,8 @@
 import { getDb } from "@/db";
 import { authorizeImapAccess } from "@/lib/imap/access";
-import { fetchImapMessage, getImapFolderStatus, listImapMailboxes, openImapFolder } from "@/lib/imap/service";
-import type { ImapFolderSnapshot, ImapMailbox } from "@/lib/imap/types";
-import { ImapStateError } from "@/lib/imap/utils";
+import { fetchImapMessage, getImapFolderStatus, listImapMailboxes, openImapFolder, storeImapFlags } from "@/lib/imap/service";
+import type { ImapFlags, ImapFolderSnapshot, ImapMailbox } from "@/lib/imap/types";
+import { ImapStateError, STORABLE_FLAGS } from "@/lib/imap/utils";
 import { verifyMailAppPassword } from "@/lib/mail-app-passwords/verify";
 import { binaryToUtf8 } from "./bytes-utils";
 import { formatFlags, MessageView, needsContent, writeFetchResponse } from "./fetch";
@@ -15,11 +15,12 @@ import { line, ResponseBuilder, responseText } from "./response";
 import { runSearch } from "./search";
 import { readSearch, SEARCH_CHARSETS } from "./search-parser";
 import { isSequenceSetToken, parseSequenceSet, resolveSequenceNumbers, resolveUids } from "./sequence-set";
+import { readStore, type StoreRequest } from "./store-parser";
 import type { FetchItem, FramedItem, FramerLimits, ImapSessionHost, SelectedMailbox, SequenceSet, SessionPrincipal } from "./types";
 
 /**
- * One IMAP4rev1 connection (RFC 3501), read-only, over A3's mailbox state and A2's mail
- * app passwords. Transport-neutral: the host feeds received octets to receive() and
+ * One IMAP4rev1 connection (RFC 3501) over A3's mailbox state and A2's mail app
+ * passwords. Transport-neutral: the host feeds received octets to receive() and
  * carries written octets to the client; this file uses no Node API.
  *
  * Commands run strictly one at a time, in order. At most MAX_QUEUED_COMMANDS wait behind
@@ -30,9 +31,11 @@ import type { FetchItem, FramedItem, FramerLimits, ImapSessionHost, SelectedMail
  * call; the host additionally calls checkAccess() periodically so an idle connection
  * whose access was revoked is closed too.
  *
- * Nothing here changes user-visible state: SELECT and EXAMINE both open the mailbox
- * read-only, BODY[] and RFC822 fetches do not set \Seen, and commands that would write
- * are refused before any storage call.
+ * The only writes are \Seen and \Flagged, the product's own read and starred state, through
+ * A3's storeImapFlags: STORE, and the implicit \Seen of a non-PEEK body fetch, in a mailbox
+ * opened with SELECT. EXAMINE is read-only. \Deleted cannot be set, and every other command
+ * that would write (COPY, EXPUNGE, APPEND, folder management) is refused before any
+ * storage call.
  */
 
 /** Capabilities before authentication. Each is implemented and tested (tests/imap-listener.test.mjs). */
@@ -49,7 +52,9 @@ export const MAX_AUTH_FAILURES = 3;
 export const AUTH_FAILURE_DELAY_MS = 1000;
 
 const SELECTED_FLAGS = "(\\Seen \\Flagged \\Deleted \\Draft)";
-const READ_ONLY_COMMANDS = new Set(["STORE", "COPY", "EXPUNGE", "APPEND", "CREATE", "DELETE", "RENAME", "SUBSCRIBE", "UNSUBSCRIBE"]);
+const PERMANENT_FLAG_NAMES: Record<string, string> = { seen: "\\Seen", flagged: "\\Flagged" };
+/** Commands that would write and are not available; refused before any storage call. */
+const UNSUPPORTED_COMMANDS = new Set(["COPY", "EXPUNGE", "APPEND", "CREATE", "DELETE", "RENAME", "SUBSCRIBE", "UNSUBSCRIBE"]);
 const STATUS_ITEMS = new Set(["MESSAGES", "RECENT", "UIDNEXT", "UIDVALIDITY", "UNSEEN"]);
 const MAX_ID_PAIRS = 30;
 
@@ -102,7 +107,7 @@ export class ImapSession {
 	}
 
 	async start(): Promise<void> {
-		await this.send(`* OK [CAPABILITY ${PREAUTH_CAPABILITIES}] ${responseText(this.options.serverName)} IMAP4rev1 ready (read-only)`);
+		await this.send(`* OK [CAPABILITY ${PREAUTH_CAPABILITIES}] ${responseText(this.options.serverName)} IMAP4rev1 ready`);
 	}
 
 	/** Octets from the client. */
@@ -240,6 +245,11 @@ export class ImapSession {
 			await this.end("Access revoked");
 		} else if (error instanceof ImapStateError && error.code === "nonexistent") {
 			await this.send(`${tag} NO [NONEXISTENT] No such mailbox`);
+		} else if (error instanceof ImapStateError && error.code === "denied") {
+			// A permission this access lacks; the access itself is intact, so the session goes on.
+			await this.send(`${tag} NO [NOPERM] ${responseText(error.message)}`);
+		} else if (error instanceof ImapStateError && error.code === "unsupported") {
+			await this.send(`${tag} NO [CANNOT] ${responseText(error.message)}`);
 		} else {
 			this.host.log({ event: "command.error", command, error: error instanceof Error ? error.message : String(error) });
 			await this.send(`${tag} NO [UNAVAILABLE] Temporary failure, try again later`);
@@ -293,10 +303,10 @@ export class ImapSession {
 			case "AUTHENTICATE":
 				return this.wrongState(tag);
 		}
-		if (READ_ONLY_COMMANDS.has(command) || command === "UID STORE" || command === "UID COPY") {
+		if (UNSUPPORTED_COMMANDS.has(command) || command === "UID COPY") {
 			// Refused before any storage call, so nothing A3 holds is touched.
-			if (/STORE|COPY|EXPUNGE/.test(command) && this.state !== "selected") return this.wrongState(tag);
-			return this.send(`${tag} NO [CANNOT] ${command} is not available: this server is read-only`);
+			if (/COPY|EXPUNGE/.test(command) && this.state !== "selected") return this.wrongState(tag);
+			return this.send(`${tag} NO [CANNOT] ${command} is not available on this server`);
 		}
 		if (this.state !== "selected") return this.isKnown(command) ? this.wrongState(tag) : this.send(`${tag} BAD Unknown command`);
 		switch (command) {
@@ -306,7 +316,7 @@ export class ImapSession {
 				return this.send(`${tag} OK CHECK completed`);
 			case "CLOSE":
 			case "UNSELECT":
-				// Read-only: CLOSE never expunges.
+				// Nothing can set \Deleted, so CLOSE has nothing to expunge.
 				reader.end();
 				this.selected = null;
 				this.state = "authenticated";
@@ -317,12 +327,15 @@ export class ImapSession {
 			case "SEARCH":
 			case "UID SEARCH":
 				return this.search(tag, reader, command === "UID SEARCH");
+			case "STORE":
+			case "UID STORE":
+				return this.store(tag, reader, command === "UID STORE");
 		}
 		return this.send(`${tag} BAD Unknown command`);
 	}
 
 	private isKnown(command: string): boolean {
-		return ["LIST", "LSUB", "STATUS", "SELECT", "EXAMINE", "NAMESPACE", "CHECK", "CLOSE", "UNSELECT", "FETCH", "UID FETCH", "SEARCH", "UID SEARCH", "LOGIN", "AUTHENTICATE", "STORE", "UID STORE", "COPY", "UID COPY", "EXPUNGE", ...READ_ONLY_COMMANDS].includes(command);
+		return ["LIST", "LSUB", "STATUS", "SELECT", "EXAMINE", "NAMESPACE", "CHECK", "CLOSE", "UNSELECT", "FETCH", "UID FETCH", "SEARCH", "UID SEARCH", "LOGIN", "AUTHENTICATE", "STORE", "UID STORE", "COPY", "UID COPY", "EXPUNGE", ...UNSUPPORTED_COMMANDS].includes(command);
 	}
 
 	// ---- any state --------------------------------------------------------------
@@ -440,7 +453,7 @@ export class ImapSession {
 		this.state = "authenticated";
 		this.host.onAuthenticated();
 		this.host.log({ event: "auth.success", userId: principal.userId, mailboxId: principal.mailboxId, appPasswordId: principal.appPasswordId });
-		await this.send(`${tag} OK [CAPABILITY ${AUTH_CAPABILITIES}] Logged in (read-only)`);
+		await this.send(`${tag} OK [CAPABILITY ${AUTH_CAPABILITIES}] Logged in`);
 	}
 
 	// ---- mailboxes --------------------------------------------------------------
@@ -511,9 +524,14 @@ export class ImapSession {
 			throw error;
 		}
 		const uids = snapshot.messages.map((entry) => entry.uid);
+		// What STORE may change here: A3's permanent flags for this access, limited to those
+		// this server can change (\Deleted is not writable yet). EXAMINE changes nothing.
+		const permanent = command === "SELECT" ? STORABLE_FLAGS.filter((flag) => snapshot.mailbox.permanentFlags.includes(flag)) : [];
+		const readOnly = permanent.length === 0;
 		this.selected = {
 			key: mailbox.key,
 			name: wireName(mailbox),
+			readOnly,
 			uidValidity: snapshot.uidValidity,
 			uidNext: snapshot.uidNext,
 			uids,
@@ -524,13 +542,14 @@ export class ImapSession {
 		this.state = "selected";
 		const firstUnseen = snapshot.messages.findIndex((entry) => !entry.flags.seen);
 		await this.send(`* FLAGS ${SELECTED_FLAGS}`);
-		await this.send("* OK [PERMANENTFLAGS ()] Read-only mailbox");
+		if (readOnly) await this.send("* OK [PERMANENTFLAGS ()] Read-only mailbox");
+		else await this.send(`* OK [PERMANENTFLAGS (${permanent.map((flag) => PERMANENT_FLAG_NAMES[flag]).join(" ")})] Flags permitted`);
 		await this.send(`* ${uids.length} EXISTS`);
 		await this.send("* 0 RECENT");
 		if (firstUnseen >= 0) await this.send(`* OK [UNSEEN ${firstUnseen + 1}] First unseen message`);
 		await this.send(`* OK [UIDVALIDITY ${snapshot.uidValidity}] UIDs valid`);
 		await this.send(`* OK [UIDNEXT ${snapshot.uidNext}] Predicted next UID`);
-		await this.send(`${tag} OK [READ-ONLY] ${command} completed`);
+		await this.send(`${tag} OK [${readOnly ? "READ-ONLY" : "READ-WRITE"}] ${command} completed`);
 	}
 
 	// ---- selected-mailbox snapshot ----------------------------------------------
@@ -632,6 +651,7 @@ export class ImapSession {
 		const targets = this.targets(set, uidMode);
 		if (!targets) return this.send(`${tag} BAD Invalid message sequence number`);
 		const wantsMetadata = items.some((item) => item.kind === "envelope" || item.kind === "body" || item.kind === "bodystructure");
+		const marksSeen = !selected.readOnly && items.some(setsSeen);
 		let missing = false;
 		let unavailable = false;
 		for (const { seq, uid } of targets) {
@@ -658,8 +678,22 @@ export class ImapSession {
 						this.cache.set(key, metadata);
 					}
 				}
+				let answer = items;
+				if (marksSeen && view && !entry.flags.seen) {
+					// RFC 3501 §6.4.5: the body was read, so the message is now \Seen, through the
+					// same write as STORE. The response carries the resulting FLAGS.
+					const flags = (await this.selectedCall(() => storeImapFlags(this.env, this.principal!, selected.key, [uid], { mode: "add", flags: ["seen"] }))).get(uid);
+					if (this.closed) return;
+					if (!flags) {
+						missing = true;
+						continue;
+					}
+					const changed = formatFlags(flags) !== formatFlags(entry.flags);
+					entry.flags = flags;
+					if (changed && !items.some((item) => item.kind === "flags")) answer = [...items, { kind: "flags" }];
+				}
 				const response = new ResponseBuilder().raw("* ");
-				writeFetchResponse(response, items, { seq, uid, flags: entry.flags, internalDate: entry.internalDate, knownSize: entry.rfc822Size, metadata, bytes: view?.bytes ?? null }, view, metadata);
+				writeFetchResponse(response, answer, { seq, uid, flags: entry.flags, internalDate: entry.internalDate, knownSize: entry.rfc822Size, metadata, bytes: view?.bytes ?? null }, view, metadata);
 				await this.host.write(response.bytes());
 			} catch (error) {
 				if (error instanceof SessionEnd || (error instanceof ImapStateError && error.code !== "unavailable")) throw error;
@@ -670,6 +704,40 @@ export class ImapSession {
 		if (unavailable) return this.send(`${tag} NO [UNAVAILABLE] Some messages could not be read`);
 		if (missing) return this.send(`${tag} NO Some of the requested messages no longer exist`);
 		await this.send(`${tag} OK ${uidMode ? "UID FETCH" : "FETCH"} completed`);
+	}
+
+	/**
+	 * STORE and UID STORE (RFC 3501 §6.4.6) over the session's snapshot: sequence numbers
+	 * are resolved to UIDs here and A3 changes only messages those UIDs still name in this
+	 * folder. Every message changed is answered with its resulting FLAGS unless .SILENT was
+	 * asked for; with .SILENT, a message whose resulting flags are not what this STORE alone
+	 * would have produced (a concurrent change, or a flag that cannot change) is still reported.
+	 */
+	private async store(tag: string, reader: CommandReader, uidMode: boolean): Promise<void> {
+		const request = readStore(reader);
+		const selected = this.selected!;
+		if (selected.readOnly) return this.send(`${tag} NO Mailbox is read-only`);
+		await this.refresh(uidMode);
+		const targets = this.targets(request.set, uidMode);
+		if (!targets) return this.send(`${tag} BAD Invalid message sequence number`);
+		const live = targets.filter((target) => !selected.vanished.has(target.uid));
+		let missing = live.length < targets.length;
+		const results = await this.selectedCall(() => storeImapFlags(this.env, this.principal!, selected.key, live.map((target) => target.uid), { mode: request.mode, flags: request.flags }));
+		for (const { seq, uid } of live) {
+			if (this.closed) return;
+			const flags = results.get(uid);
+			const entry = selected.entries.get(uid);
+			if (!flags || !entry) {
+				missing = true;
+				continue;
+			}
+			const expected = formatFlags(applyStore(entry.flags, request));
+			entry.flags = flags;
+			if (request.silent && formatFlags(flags) === expected) continue;
+			await this.send(`* ${seq} FETCH (${uidMode ? `UID ${uid} ` : ""}FLAGS ${formatFlags(flags)})`);
+		}
+		if (missing) return this.send(`${tag} NO Some of the requested messages no longer exist`);
+		await this.send(`${tag} OK ${uidMode ? "UID STORE" : "STORE"} completed`);
 	}
 
 	private async search(tag: string, reader: CommandReader, uidMode: boolean): Promise<void> {
@@ -706,4 +774,20 @@ export class ImapSession {
 		if (unavailable) return this.send(`${tag} NO [UNAVAILABLE] Some messages could not be searched`);
 		await this.send(`${tag} OK ${uidMode ? "UID SEARCH" : "SEARCH"} completed`);
 	}
+}
+
+/** FETCH items that set \Seen when fetched (RFC 3501 §6.4.5): BODY[…] without .PEEK, RFC822 and RFC822.TEXT, not RFC822.HEADER. */
+function setsSeen(item: FetchItem): boolean {
+	return item.kind === "rfc822" || item.kind === "rfc822.text" || (item.kind === "section" && !item.peek);
+}
+
+/** The flags a STORE would leave on a message if nothing else changed them. */
+function applyStore(flags: ImapFlags, request: StoreRequest): ImapFlags {
+	const next = { ...flags };
+	for (const flag of STORABLE_FLAGS) {
+		const named = request.flags.includes(flag);
+		if (request.mode === "replace") next[flag as "seen" | "flagged"] = named;
+		else if (named) next[flag as "seen" | "flagged"] = request.mode === "add";
+	}
+	return next;
 }

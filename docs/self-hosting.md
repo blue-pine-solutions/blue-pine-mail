@@ -33,9 +33,9 @@ Optional: `SMTP_TLS_KEY` and `SMTP_TLS_CERT` (paths inside the container) enable
 
 **Cloudflare Email Sending.** `CF_ACCOUNT_ID` plus a `CF_TOKEN` with Email Sending: Edit. The domain must be a Cloudflare zone with Email Sending set up; the server calls the REST API, no Workers plan needed.
 
-## Mail clients over IMAP (read-only)
+## Mail clients over IMAP
 
-The container can serve IMAP4rev1 to desktop and phone mail clients. It is **read-only** in this version: clients can list folders, open and search mail and download attachments, but cannot change anything. Marking read or flagged, moving, copying, deleting, creating folders and uploading (APPEND) are refused, and opening a message does not mark it read. There is no SMTP submission service yet, so a client cannot send mail; use the web app for that, and set clients up with IMAP only.
+The container can serve IMAP4rev1 to desktop and phone mail clients. Clients can list folders, open and search mail and download attachments, and mark messages read, unread, flagged or unflagged; opening a message marks it read, as in the web app. These are the same read and starred states the web app shows, in both directions. Nothing else can be changed over IMAP in this version: moving, copying, deleting, creating folders and uploading (APPEND) are refused. There is no SMTP submission service yet, so a client cannot send mail; use the web app for that, and set clients up with IMAP only.
 
 IMAP is off unless you turn it on, and it only speaks **implicit TLS** (IMAPS, port 993). There is no plaintext port 143 and no STARTTLS.
 
@@ -51,7 +51,7 @@ Publish the port in `docker-compose.yml` alongside the existing ones:
 
 ```yaml
     ports:
-      - "993:993"     # IMAP over TLS (read-only)
+      - "993:993"     # IMAP over TLS
 ```
 
 The application keeps running as the unprivileged `node` user; Docker lets containers bind low ports without root, as it already does for port 25. Map the port directly rather than through a TCP proxy, so the listener sees each client's address for its limits.
@@ -79,7 +79,7 @@ If `CF_TOKEN` can also edit DNS and Email Routing on your zones, adding a domain
 | `SMTP_TLS_KEY`, `SMTP_TLS_CERT` | unset | STARTTLS certificate for the listener |
 | `SMTP_URL` | unset | Outbound relay |
 | `SMTP_TLS_REJECT_UNAUTHORIZED` | `true` | Trust self-signed relay certificates when `false` |
-| `IMAP_PORT` | `0` (off) | Read-only IMAP over implicit TLS; `993` to enable |
+| `IMAP_PORT` | `0` (off) | IMAP over implicit TLS (read, and read/flagged marks); `993` to enable |
 | `IMAP_HOST` | `0.0.0.0` | Address the IMAP listener binds |
 | `IMAP_TLS_CERT`, `IMAP_TLS_KEY` | unset | PEM certificate chain and key for IMAP; required when `IMAP_PORT` is set |
 | `CF_ACCOUNT_ID`, `CF_TOKEN` | unset | Cloudflare Email Sending, and zone management if the token allows |
@@ -118,6 +118,6 @@ MAILFLARE_RUNTIME=node NODE_ENV=production DATA_DIR=./data node dist/server.mjs
 
 ## Limitations
 
-- IMAP is read-only and there is no SMTP submission service: mail clients can read and search mail but not change it or send. Use the web app, a JMAP client or the API for those. IMAP is only available in this Node/Docker build, not on Cloudflare Workers.
+- Over IMAP, mail clients can read and search mail and mark it read or flagged, but cannot move, copy, delete or upload it, and there is no SMTP submission service, so they cannot send. Use the web app, a JMAP client or the API for those. IMAP is only available in this Node/Docker build, not on Cloudflare Workers.
 - IMAP rate and connection limits are per instance and in memory.
 - All state lives on one local volume with SQLite; plan volume backups and host capacity accordingly.

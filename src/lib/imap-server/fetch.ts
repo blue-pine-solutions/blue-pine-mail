@@ -114,8 +114,8 @@ export class MessageView {
 }
 
 /**
- * Append `seq FETCH (...)` data for one message (without the leading `* `). Read-only:
- * BODY[] and RFC822 never set \Seen, so FLAGS are exactly A3's.
+ * Append `seq FETCH (...)` data for one message (without the leading `* `). FLAGS are
+ * `source.flags` exactly; any implicit \Seen has already been applied by the session.
  */
 export function writeFetchResponse(builder: ResponseBuilder, items: FetchItem[], source: FetchSource, view: MessageView | null, metadata: MessageMetadata | null): void {
 	builder.raw(`${source.seq} FETCH (`);

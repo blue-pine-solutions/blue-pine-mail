@@ -2,7 +2,8 @@
  * Certification of the A3 IMAP state layer on the Workers runtime: bundles
  * src/lib/imap/ into a Worker, runs it in workerd (Miniflare) with real D1 and R2
  * bindings, and exercises migrations, concurrent first access and delivery, deletion,
- * canonical bytes, the database guards, backup/restore and a restart.
+ * canonical bytes, batched flag writes (A5.1), the database guards, backup/restore and a
+ * restart.
  *
  *   node scripts/imap-state-d1-check.mjs
  *
@@ -49,6 +50,10 @@ export default {
 			if (op === "fetch") {
 				const result = await imap.fetchImapMessage(env, ...args);
 				return Response.json(result && { uid: result.uid, size: result.size, length: result.bytes.byteLength, sha: await sha256(result.bytes), source: result.source });
+			}
+			if (op === "store") {
+				const result = await imap.storeImapFlags(env, ...args);
+				return Response.json(Object.fromEntries(result));
 			}
 			if (op === "roundTrip") {
 				const document = await exportDatabaseRecords(env.DB);
@@ -181,11 +186,45 @@ try {
 	const reassign = await op("sql", ["UPDATE imap_message_uids SET uid = 99999 WHERE imap_folder_id = ? AND uid = (SELECT MIN(uid) FROM imap_message_uids WHERE imap_folder_id = ?)", folderId, folderId]);
 	check("reassigning a UID is rejected", /cannot be reassigned/.test(reassign.error ?? ""), reassign);
 
+	console.log("Batched flag writes (A5.1)");
+	const revision = async () => Number((await sql(["SELECT revision FROM jmap_mailbox_revisions WHERE mailbox_id = 'mbx-a'"]))[0][0]?.revision ?? 0);
+	const inboxNow = await op("openImapFolder", owner, "inbox");
+	const firstUids = inboxNow.messages.slice(0, 200).map((entry) => entry.uid);
+	const beforeStore = await revision();
+	const seenAll = await op("store", owner, "inbox", firstUids, { mode: "add", flags: ["seen"] });
+	check("+FLAGS \\Seen over 200 UIDs (three chunks) returns every UID seen", firstUids.every((uid) => seenAll[uid]?.seen === true), Object.keys(seenAll).length);
+	// The snapshot is in UID order, so these are exactly the UIDs up to the 200th.
+	const unread = (await sql(["SELECT COUNT(*) AS n FROM messages m JOIN imap_message_uids u ON u.message_id = m.id JOIN imap_folders f ON f.id = u.imap_folder_id WHERE f.mailbox_id = 'mbx-a' AND f.folder_key = 'inbox' AND u.uid <= ? AND m.read = 0", firstUids.at(-1)]))[0][0].n;
+	check("messages.read is set for all of them", unread === 0, unread);
+	const afterStore = await revision();
+	check("the product revision moved", afterStore > beforeStore, [beforeStore, afterStore]);
+	await op("store", owner, "inbox", firstUids, { mode: "add", flags: ["seen"] });
+	check("a no-op STORE writes nothing", (await revision()) === afterStore);
+	const [one] = firstUids;
+	const replaced = await op("store", owner, "inbox", [one], { mode: "replace", flags: ["flagged"] });
+	check("FLAGS (\\Flagged) replaces: flagged, not seen", replaced[one]?.flagged === true && replaced[one]?.seen === false, replaced);
+	const removed = await op("store", owner, "inbox", [one], { mode: "remove", flags: ["flagged"] });
+	check("-FLAGS clears", removed[one]?.flagged === false, removed);
+	const movedEntry = inboxNow.messages[1];
+	await sql(["UPDATE messages SET status = 'archived', starred = 0 WHERE id = ?", movedEntry.messageId]);
+	const stale = await op("store", owner, "inbox", [movedEntry.uid], { mode: "add", flags: ["flagged"] });
+	const movedRow = (await sql(["SELECT starred FROM messages WHERE id = ?", movedEntry.messageId]))[0][0];
+	check("a UID whose message moved away changes nothing and reads null", stale[movedEntry.uid] === null && movedRow.starred === 0, [stale, movedRow]);
+	await sql(["INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, status, read, created_at) VALUES ('out-d1', 'user-a', 'mbx-a', 'outbound', 'a@example.test', 'b@x', 'sent', 1, 9500)"]);
+	const sentUid = await op("ensureImapUid", owner, "sent", "out-d1");
+	const unseenSent = await op("store", owner, "sent", [sentUid], { mode: "remove", flags: ["seen"] });
+	check("clearing \\Seen on outbound mail leaves it seen and unwritten", unseenSent[sentUid]?.seen === true && (await sql(["SELECT read FROM messages WHERE id = 'out-d1'"]))[0][0].read === 1, unseenSent);
+	check("\\Deleted with management access is unsupported", (await op("store", owner, "inbox", [one], { mode: "add", flags: ["deleted"] })).code === "unsupported");
+	await op("openImapFolder", { userId: "user-b", mailboxId: "mbx-s" }, "inbox");
+	check("\\Deleted for a read-only delegate is denied", (await op("store", { userId: "user-b", mailboxId: "mbx-s" }, "inbox", [1], { mode: "add", flags: ["deleted"] })).code === "denied");
+	check("\\Seen for a read-only delegate is allowed", typeof (await op("store", { userId: "user-b", mailboxId: "mbx-s" }, "inbox", [1], { mode: "add", flags: ["seen"] })).error === "undefined");
+
 	console.log("Shared access and revocation");
 	check("read-only delegate can open the shared INBOX", !!(await op("openImapFolder", { userId: "user-b", mailboxId: "mbx-s" }, "inbox")).uidValidity);
 	await sql(["DELETE FROM mailbox_access WHERE id = 'acc-b'"]);
 	check("revoked delegate is refused on the next call", (await op("openImapFolder", { userId: "user-b", mailboxId: "mbx-s" }, "inbox")).code === "forbidden");
 	check("another mailbox's folders are unreachable", (await op("openImapFolder", { userId: "user-b", mailboxId: "mbx-a" }, "inbox")).code === "forbidden");
+	check("a revoked delegate's STORE is forbidden, not denied", (await op("store", { userId: "user-b", mailboxId: "mbx-s" }, "inbox", [1], { mode: "add", flags: ["seen"] })).code === "forbidden");
 
 	console.log("Backup round trip and restart");
 	const beforeBackup = await op("openImapFolder", owner, "inbox");

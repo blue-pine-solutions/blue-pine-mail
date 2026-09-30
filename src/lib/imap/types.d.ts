@@ -92,4 +92,17 @@ export type ImapMessageContent = {
 
 export type ImapFlagChanges = Partial<Record<ImapFlagName, boolean>>;
 
-export type ImapStateErrorCode = "forbidden" | "nonexistent" | "unavailable";
+/**
+ * A STORE-style flag change for many UIDs (storeImapFlags). `replace` sets every flag it can
+ * change to whether it is listed, `add` sets the listed flags and `remove` clears them.
+ * Only \Seen and \Flagged can change; naming `deleted` is refused (`denied` without
+ * management access, `unsupported` with it).
+ */
+export type ImapFlagStore = { mode: "replace" | "add" | "remove"; flags: ImapFlagName[] };
+
+/**
+ * `forbidden`: the principal no longer has access at all (the session must end).
+ * `denied`: access is intact but does not include this change (answer NO, keep the session).
+ * `unsupported`: the change is not available on this server.
+ */
+export type ImapStateErrorCode = "forbidden" | "denied" | "unsupported" | "nonexistent" | "unavailable";

@@ -1,4 +1,4 @@
-import type { ImapFlags, ImapFolderKey, ImapSpecialUse, ImapStateErrorCode, ImapSystemRole } from "./types";
+import type { ImapFlagName, ImapFlags, ImapFolderKey, ImapSpecialUse, ImapStateErrorCode, ImapSystemRole } from "./types";
 
 /**
  * The product folders IMAP exposes, in listing order, and the `messages.status` each
@@ -20,6 +20,12 @@ export const UID_ASSIGNMENT_CHUNK = 500;
 
 /** D1 accepts at most 100 bound parameters per statement. */
 export const IN_LIST_CHUNK = 90;
+
+/** UIDs per storeImapFlags statement, leaving room under IN_LIST_CHUNK for the membership and value parameters. */
+export const FLAG_STORE_CHUNK = 80;
+
+/** Flags a STORE may change. \Deleted is not among them yet. */
+export const STORABLE_FLAGS: readonly ImapFlagName[] = ["seen", "flagged"];
 
 export class ImapStateError extends Error {
 	constructor(readonly code: ImapStateErrorCode, message: string) {
