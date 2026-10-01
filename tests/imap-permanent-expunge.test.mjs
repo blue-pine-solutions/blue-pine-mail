@@ -855,10 +855,11 @@ test("a5.2c: the object-key allowlist accepts exactly the shapes the writers pro
 	assert.ok(ok("raw", "inbound/1790000000000-abc.eml"));
 	assert.ok(ok("raw", "imports/msg_1.eml"));
 	assert.ok(ok("raw", "drafts/msg_1.eml"));
+	assert.ok(ok("raw", "copies/msg_1.eml"), "IMAP COPY's raw objects (A5.8)");
 	assert.ok(ok("raw", "canonical/msg_1/0123456789abcdef0123456789abcdef-11111111-2222-3333-4444-555555555555.eml"));
 	assert.ok(ok("attachment", "attachments/msg_1/att_1/report final.pdf"));
 	for (const [kind, key] of [
-		["raw", "backups/x/backup.json"], ["raw", "jmap-uploads/u/x"], ["raw", "imports/msg_2.eml"], ["raw", "drafts/msg_2.eml"], ["raw", "canonical/msg_2/x.eml"],
+		["raw", "backups/x/backup.json"], ["raw", "jmap-uploads/u/x"], ["raw", "imports/msg_2.eml"], ["raw", "drafts/msg_2.eml"], ["raw", "copies/msg_2.eml"], ["raw", "copies/msg_1.eml/x"], ["raw", "copies/msg_1"], ["raw", "canonical/msg_2/x.eml"],
 		["raw", "inbound/../backups/x.eml"], ["raw", "inbound/"], ["raw", "inbound/a/b.eml"], ["raw", "/inbound/x.eml"], ["raw", "inbound/x.txt"], ["raw", "attachments/msg_1/a/b"],
 		["attachment", "attachments/msg_2/att/x"], ["attachment", "attachments/msg_1/att/.."], ["attachment", "attachments/msg_1/x"], ["attachment", "inbound/x.eml"], ["raw", null], ["raw", ""], ["raw", "inbound\\x.eml"],
 	]) assert.equal(ok(kind, key), false, `${kind} ${key}`);

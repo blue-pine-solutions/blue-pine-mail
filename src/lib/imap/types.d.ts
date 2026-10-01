@@ -117,7 +117,12 @@ export type ImapFlagStore = { mode: "replace" | "add" | "remove"; flags: ImapFla
  *   while authorizing), as opposed to evaluated and refused (`forbidden`). Only
  *   getImapChangeSignal reports it, so IDLE can fail closed on prolonged uncertainty.
  */
-export type ImapStateErrorCode = "forbidden" | "denied" | "unsupported" | "limit" | "nonexistent" | "nonexistent-destination" | "unavailable" | "unconfirmed";
+export type ImapStateErrorCode = "forbidden" | "denied" | "unsupported" | "limit" | "nonexistent" | "nonexistent-destination" | "unavailable" | "unconfirmed" | "vanished";
+
+/** A message one COPY copied (A5.8): its source UID and the UID its copy holds in the destination, read back inside the commit. */
+export type ImapCopiedMessage = { uid: number; messageId: string; destinationUid: number | null; destinationUidValidity: number | null };
+
+export type ImapCopyResult = { copied: ImapCopiedMessage[] };
 
 /** A draft created by IMAP APPEND (A5.7): the octets exactly as received, and what APPEND said about them. */
 export type ImapDraftAppend = {

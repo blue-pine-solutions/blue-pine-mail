@@ -540,3 +540,136 @@ export async function insertImapDraft(
 	const [row] = (results.at(-1)!.results ?? []) as Array<{ uid: number; uid_validity: number }>;
 	return row ? { uid: Number(row.uid), uidValidity: Number(row.uid_validity) } : null;
 }
+
+/**
+ * The `messages` columns IMAP COPY (A5.8) copies from the live source row, and the ones it sets
+ * itself. Together they are every column of the table: tests/imap-copy.test.mjs compares them
+ * with the migrated schema, so a column added upstream cannot silently go missing from copies.
+ */
+export const COPY_COPIED_COLUMNS = [
+	"user_id",
+	"mailbox_id",
+	"direction",
+	"provider_message_id",
+	"from_addr",
+	"to_addr",
+	"cc_addr",
+	"bcc_addr",
+	"subject",
+	"snippet",
+	"text_body",
+	"html_body",
+	"read",
+	"starred",
+	"thread_id",
+	"in_reply_to",
+	"references_header",
+	"spam_score",
+	"spam_verdict",
+	"spam_signals",
+	"spam_analyzed_at",
+	"spam_analysis_error",
+	"created_at",
+] as const;
+
+/** Set by COPY: a new id and raw object, the destination's placement, and no snooze. */
+export const COPY_SET_COLUMNS = ["id", "raw_r2_key", "status", "folder_id", "snoozed_until"] as const;
+
+/** One message a COPY will create; its raw object and attachment objects are already stored under the keys named here. */
+export type ImapPlannedCopy = {
+	sourceUid: number;
+	sourceMessageId: string;
+	id: string;
+	rawR2Key: string;
+	size: number;
+	attachments: Array<{ sourceId: string; id: string; r2Key: string }>;
+};
+
+/**
+ * Commit an IMAP COPY (A5.8) as one batch (a transaction on D1 and on the Node SQLite wrapper),
+ * after every copy's objects were stored. All or nothing:
+ *
+ * 1. the destination folder's state row, created if this is its first use;
+ * 2. for each copy, in ascending source UID order: its `messages` row, copied from the live
+ *    source row (COPY_COPIED_COLUMNS) only while the source UID still names that message in the
+ *    source folder, `authority` still holds (authorityGuard), a custom destination still exists
+ *    and, for Spam, the source is inbound; its attachment rows, copied from the source's rows
+ *    under their new ids and keys; then its destination UID from UIDNEXT (bp0002's trigger
+ *    advances it), bound to its raw object and exact size, without \Deleted;
+ * 3. a completeness check: unless every planned copy got its row, every attachment row and its
+ *    UID, a deliberately invalid insert (UIDVALIDITY 0, refused by imap_folders' CHECK) aborts
+ *    the batch, so no copy is committed if any one could not be;
+ * 4. the destination UIDs and UIDVALIDITY, read back inside the transaction (COPYUID).
+ *
+ * The source row, its UID and its objects are only read. Bound parameters stay per statement
+ * (lists travel as one JSON parameter), whatever the number of copies.
+ */
+export async function insertImapCopies(
+	db: AppDatabase,
+	authority: ImapDeletionAuthority,
+	source: { folderId: string; key: ImapFolderKey },
+	destination: { key: ImapFolderKey; status: string; folderId: string | null },
+	copies: ImapPlannedCopy[],
+): Promise<Map<string, { uid: number; uidValidity: number }>> {
+	const now = nowSeconds();
+	const { mailboxId } = authority;
+	const copied = sql.raw(COPY_COPIED_COLUMNS.join(", "));
+	const inSource = membershipCondition(mailboxId, source.key);
+	const inDestination = membershipCondition(mailboxId, destination.key);
+	const destinationGuard = destination.folderId === null ? sql`1` : sql`EXISTS (SELECT 1 FROM folders WHERE folders.id = ${destination.folderId} AND folders.mailbox_id = ${mailboxId})`;
+	const spamGuard = destination.key === "junk" ? sql`AND messages.direction = 'inbound'` : sql``;
+	const copyIds = JSON.stringify(copies.map((copy) => copy.id));
+	const attachmentCount = copies.reduce((total, copy) => total + copy.attachments.length, 0);
+	const statements: SQL[] = [
+		sql`
+			INSERT OR IGNORE INTO imap_folders (id, mailbox_id, folder_key, uid_validity, uid_next, created_at)
+			SELECT ${newId("imf")}, ${mailboxId}, ${destination.key}, MAX(${now}, COALESCE((SELECT MAX(uid_validity) FROM imap_folders WHERE mailbox_id = ${mailboxId}), 0) + 1), 1, ${now}
+		`,
+	];
+	for (const copy of [...copies].sort((a, b) => a.sourceUid - b.sourceUid)) {
+		statements.push(sql`
+			INSERT INTO messages (id, raw_r2_key, status, folder_id, snoozed_until, ${copied})
+			SELECT ${copy.id}, ${copy.rawR2Key}, ${destination.status}, ${destination.folderId}, NULL, ${copied}
+			FROM messages
+			WHERE messages.id = ${copy.sourceMessageId}
+				AND ${inSource}
+				AND EXISTS (SELECT 1 FROM imap_message_uids s WHERE s.imap_folder_id = ${source.folderId} AND s.uid = ${copy.sourceUid} AND s.message_id = ${copy.sourceMessageId})
+				${spamGuard}
+				AND ${destinationGuard}
+				AND ${authorityGuard(authority)}
+		`);
+		for (const attachment of copy.attachments) {
+			statements.push(sql`
+				INSERT INTO message_attachments (id, message_id, filename, content_type, size, disposition, content_id, r2_key, created_at)
+				SELECT ${attachment.id}, ${copy.id}, filename, content_type, size, disposition, content_id, ${attachment.r2Key}, ${now}
+				FROM message_attachments
+				WHERE id = ${attachment.sourceId} AND message_id = ${copy.sourceMessageId}
+					AND EXISTS (SELECT 1 FROM messages WHERE messages.id = ${copy.id})
+			`);
+		}
+		statements.push(sql`
+			INSERT INTO imap_message_uids (imap_folder_id, uid, message_id, rfc822_key, rfc822_size, created_at)
+			SELECT f.id, f.uid_next, ${copy.id}, ${copy.rawR2Key}, ${copy.size}, ${now}
+			FROM imap_folders f
+			WHERE f.mailbox_id = ${mailboxId} AND f.folder_key = ${destination.key}
+				AND EXISTS (SELECT 1 FROM messages WHERE messages.id = ${copy.id} AND ${inDestination})
+		`);
+	}
+	statements.push(
+		sql`
+			INSERT INTO imap_folders (id, mailbox_id, folder_key, uid_validity, uid_next, created_at)
+			SELECT ${newId("imf")}, ${mailboxId}, 'copy-incomplete', 0, 1, ${now}
+			WHERE (SELECT COUNT(*) FROM imap_message_uids u JOIN imap_folders f ON f.id = u.imap_folder_id WHERE f.mailbox_id = ${mailboxId} AND f.folder_key = ${destination.key} AND u.message_id IN (SELECT value FROM json_each(${copyIds}))) != ${copies.length}
+				OR (SELECT COUNT(*) FROM message_attachments WHERE message_id IN (SELECT value FROM json_each(${copyIds}))) != ${attachmentCount}
+		`,
+		sql`
+			SELECT u.uid AS uid, u.message_id AS message_id, f.uid_validity AS uid_validity
+			FROM imap_message_uids u
+			JOIN imap_folders f ON f.id = u.imap_folder_id
+			WHERE f.mailbox_id = ${mailboxId} AND f.folder_key = ${destination.key} AND u.message_id IN (SELECT value FROM json_each(${copyIds}))
+		`,
+	);
+	const results = await batchSql(db, statements);
+	const rows = (results.at(-1)!.results ?? []) as Array<{ uid: number; message_id: string; uid_validity: number }>;
+	return new Map(rows.map((row) => [String(row.message_id), { uid: Number(row.uid), uidValidity: Number(row.uid_validity) }]));
+}

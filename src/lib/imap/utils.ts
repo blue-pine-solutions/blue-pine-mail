@@ -92,9 +92,40 @@ export function imapMoveTarget(source: ImapFolderKey, destination: ImapFolderKey
 	if (to.kind === "role" && (to.role === "sent" || to.role === "drafts")) return { refusal: `Messages cannot be moved into ${to.role === "sent" ? "Sent" : "Drafts"}` };
 	if (source === "drafts" && destination !== "trash") return { refusal: "Drafts can only be moved to Trash" };
 	if (source === "sent" && destination === "junk") return { refusal: "Sent mail cannot be moved to Spam" };
-	if (to.kind === "folder") return { target: { status: "received", folderId: to.folderId, training: null } };
 	const training = destination === "junk" ? "spam" : source === "junk" && destination === "inbox" ? "ham" : null;
-	return { target: { status: to.status, folderId: null, training } };
+	return { target: { ...folderPlacement(to), training } };
+}
+
+/** The product state a message has in a destination folder: what MOVE and COPY both write. */
+function folderPlacement(to: NonNullable<ReturnType<typeof parseFolderKey>>): { status: string; folderId: string | null } {
+	return to.kind === "folder" ? { status: "received", folderId: to.folderId } : { status: to.status, folderId: null };
+}
+
+/** Most messages one COPY may name (A5.8): the whole COPY is one transaction, and every message is duplicated. */
+export const MAX_COPY_MESSAGES = 1000;
+
+/** Most octets one COPY may duplicate (A5.8): raw messages plus attachment objects, counted as they are copied. */
+export const MAX_COPY_BYTES = 256 * 1024 * 1024;
+
+/**
+ * The folder policy of IMAP COPY (A5.8): the product state the new copy gets in `destination`,
+ * or why the copy is refused. The placement is MOVE's (folderPlacement); the policy differs
+ * where a copy is not a move:
+ *
+ * - The source's own folder is a valid destination: COPY makes another message there.
+ * - Sent and Drafts are never destinations (sending and composing are not copies), and Drafts
+ *   is never a source (a copy of a draft is neither a new draft, which APPEND makes with its
+ *   own checks, nor the discard MOVE allows).
+ * - Sent mail cannot be copied to Spam (the caller also refuses any outbound message there).
+ * - Copying never trains the spam filter: a copy into Spam is not a report.
+ */
+export function imapCopyTarget(source: ImapFolderKey, destination: ImapFolderKey): { target: { status: string; folderId: string | null } } | { refusal: string } {
+	const to = parseFolderKey(destination);
+	if (!to || !parseFolderKey(source)) return { refusal: "Unknown folder" };
+	if (to.kind === "role" && (to.role === "sent" || to.role === "drafts")) return { refusal: `Messages cannot be copied into ${to.role === "sent" ? "Sent" : "Drafts"}` };
+	if (source === "drafts") return { refusal: "Drafts cannot be copied" };
+	if (source === "sent" && destination === "junk") return { refusal: "Sent mail cannot be copied to Spam" };
+	return { target: folderPlacement(to) };
 }
 
 export class ImapStateError extends Error {
@@ -230,7 +261,8 @@ export function chunk<T>(items: T[], size: number): T[][] {
  *
  * - raw: `inbound/<name>.eml` (received mail, src/lib/email/inbound.ts and intake.ts),
  *   `imports/<messageId>.eml` (src/lib/import/service.ts), `drafts/<messageId>.eml` (JMAP
- *   Email/import) and `canonical/<messageId>/<name>.eml` (A1's canonical layer);
+ *   Email/import, IMAP APPEND), `copies/<messageId>.eml` (IMAP COPY, A5.8) and
+ *   `canonical/<messageId>/<name>.eml` (A1's canonical layer);
  * - attachment: `attachments/<messageId>/<attachmentId>/<filename>`.
  *
  * Anything else (`backups/`, `jmap-uploads/`, avatars, another message's key, a path with an
@@ -244,7 +276,7 @@ export function isDeletableMessageObjectKey(kind: "raw" | "attachment", key: unk
 	if (kind === "attachment") return segments.length === 4 && segments[0] === "attachments" && segments[1] === messageId;
 	const [namespace] = segments;
 	if (namespace === "inbound") return segments.length === 2 && segments[1].endsWith(".eml") && segments[1].length > 4;
-	if (namespace === "imports" || namespace === "drafts") return segments.length === 2 && segments[1] === `${messageId}.eml`;
+	if (namespace === "imports" || namespace === "drafts" || namespace === "copies") return segments.length === 2 && segments[1] === `${messageId}.eml`;
 	if (namespace === "canonical") return segments.length === 3 && segments[1] === messageId && segments[2].endsWith(".eml") && segments[2].length > 4;
 	return false;
 }

@@ -226,20 +226,36 @@ test("the IMAP state layer, flag writes included, stays Workers/D1-safe", () => 
 		const callers = [...sourceFiles("src"), "worker.ts", "worker-utils.ts"].filter((file) => new RegExp(`\\b${writer}\\(`).test(read(file)) && dirname(file) !== join("src", "lib", "imap"));
 		assert.deepEqual(callers, [join("src", "lib", "imap-server", "session.ts")], writer);
 	}
-	// UIDPLUS (A5.3): COPYUID is sent in exactly one place, MOVE, from the mapping the relocation
-	// batch read back (copyUidData); COPY, which would owe COPYUID, is still refused before any
-	// storage call. APPEND (A5.7) sends APPENDUID in exactly one place, from what appendImapDraft's
-	// commit read back, and only the listener creates drafts through it.
+	// UIDPLUS (A5.3): MOVE sends COPYUID in an untagged OK, from the mapping the relocation batch
+	// read back (copyUidData); COPY (A5.8) sends it in its tagged OK, from what copyImapMessages'
+	// commit read back, and only the listener copies messages. APPEND (A5.7) sends APPENDUID in
+	// exactly one place, from what appendImapDraft's commit read back, and only the listener
+	// creates drafts through it.
 	const session = read(join("src", "lib", "imap-server", "session.ts"));
 	assert.equal(session.match(/`\* OK \[COPYUID \$\{/g)?.length, 1);
 	assert.match(session, /const copyUid = copyUidData\(result\.moved\);/);
+	assert.match(session, /const copyUid = copyUidData\(result\.copied\);/);
+	assert.equal(session.match(/\[COPYUID \$\{copyUid\}\]/g)?.length, 2, "COPYUID is built in exactly the MOVE and COPY answers");
+	const copyCallers = [...sourceFiles("src"), "worker.ts", "worker-utils.ts"].filter((file) => /\bcopyImapMessages\(/.test(read(file)) && dirname(file) !== join("src", "lib", "imap"));
+	assert.deepEqual(copyCallers, [join("src", "lib", "imap-server", "session.ts")], "copyImapMessages");
+	// COPY never trains the spam filter: neither its handler nor A3's copy path calls the training.
+	const copyHandler = session.slice(session.indexOf("private async copy("), session.indexOf("/** Post-MOVE spam training."));
+	assert.ok(copyHandler.length > 0 && !/train/i.test(copyHandler), "the COPY handler does not train");
+	const service = read(join("src", "lib", "imap", "service.ts"));
+	const copyService = service.slice(service.indexOf("export async function copyImapMessages("), service.indexOf("async function countSources("));
+	assert.ok(copyService.length > 0 && !/train|recordSpamTraining|spamTrainingStatements/.test(copyService), "A3's copy path does not train");
+	// COPY's limits and its raw-object namespace (deletable on permanent expunge, like the other owned namespaces).
+	const imapUtils = read(join("src", "lib", "imap", "utils.ts"));
+	assert.match(imapUtils, /export const MAX_COPY_MESSAGES = 1000;/);
+	assert.match(imapUtils, /export const MAX_COPY_BYTES = 256 \* 1024 \* 1024;/);
+	assert.match(imapUtils, /namespace === "imports" \|\| namespace === "drafts" \|\| namespace === "copies"/);
 	assert.equal(session.match(/\[APPENDUID/g)?.length, 1);
 	assert.match(session, /OK \[APPENDUID \$\{result\.uidValidity\} \$\{result\.uid\}\] APPEND completed/);
 	const appendCallers = [...sourceFiles("src"), "worker.ts", "worker-utils.ts"].filter((file) => /\bappendImapDraft\(/.test(read(file)) && dirname(file) !== join("src", "lib", "imap"));
 	assert.deepEqual(appendCallers, [join("src", "lib", "imap-server", "session.ts")], "appendImapDraft");
 	assert.match(session.match(/export const AUTH_CAPABILITIES = "([^"]*)"/)[1], /(^| )UIDPLUS( |$)/);
 	assert.doesNotMatch(session.match(/export const AUTH_CAPABILITIES = "([^"]*)"/)[1], /LITERAL|MULTIAPPEND|APPENDLIMIT|CATENATE|BINARY/);
-	assert.match(session, /const UNSUPPORTED_COMMANDS = new Set\(\["COPY"\]\);/);
+	assert.doesNotMatch(session, /UNSUPPORTED_COMMANDS|is not available on this server/, "every command offered is implemented");
 	// The APPEND size limit is JMAP's maxSizeUpload itself, so the two cannot diverge.
 	assert.match(read(join("src", "lib", "imap-server", "append.ts")), /export const MAX_APPEND_SIZE = LIMITS\.maxSizeUpload;/);
 	// Mailbox management (A5.5a) goes through the R-1 service only; the engine never writes folders itself.

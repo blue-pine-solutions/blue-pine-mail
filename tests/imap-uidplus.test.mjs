@@ -12,8 +12,9 @@ import { assertTagged, install, loadApp, memoryClient } from "./support/imap-har
  * - MOVE and UID MOVE report `* OK [COPYUID …]` before their EXPUNGEs, from the destination UIDs
  *   and UIDVALIDITY the committing relocation batch read back; never for a move that did not
  *   commit.
- * - UIDPLUS is advertised after authentication; COPY stays refused. APPEND (A5.7, Drafts only)
- *   reports APPENDUID only for a committed draft; it is certified in imap-append.test.mjs.
+ * - UIDPLUS is advertised after authentication. APPEND (A5.7, Drafts only) reports APPENDUID and
+ *   COPY (A5.8) COPYUID only when they commit; they are certified in imap-append.test.mjs and
+ *   imap-copy.test.mjs.
  */
 const { app, cleanup } = await loadApp("imap-uidplus");
 test.after(cleanup);
@@ -182,8 +183,11 @@ test("a5.3: UIDPLUS is advertised after authentication only; UID EXPUNGE needs a
 	await client.command("SELECT INBOX");
 	assert.deepEqual(texts(await client.command("CAPABILITY")), [`* CAPABILITY ${AUTH}`], "the same in the selected state");
 	const before = state(context);
-	for (const command of ["COPY 1 Trash", "UID COPY 1 Trash"]) {
-		assertTagged(await client.command(command), "NO", /\[CANNOT\] .* not available on this server/, command);
+	// A COPY that commits nothing (A5.8: never into Sent or Drafts) carries no COPYUID.
+	for (const command of ["COPY 1 Sent", "UID COPY 1 Drafts"]) {
+		const refused = await client.command(command);
+		assertTagged(refused, "NO", /\[CANNOT\] Messages cannot be copied into/, command);
+		assert.ok(!refused.tagged.includes("COPYUID"));
 	}
 	// An APPEND that commits nothing (here a message without From) carries no APPENDUID.
 	client.write("ap APPEND Drafts (\\Seen) {12}\r\n");

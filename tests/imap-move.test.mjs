@@ -150,10 +150,10 @@ test("a5.2b/a5.3: MOVE and UIDPLUS are advertised after authentication only; mal
 		assertTagged(await client.command(command), "BAD", undefined, command);
 	}
 	assertTagged(await client.command("MOVE 3 Trash"), "BAD", /Invalid message sequence number/, "beyond the mailbox");
-	// UID EXPUNGE (A5.3) with nothing marked changes nothing; COPY is still unimplemented.
+	// UID EXPUNGE (A5.3) with nothing marked changes nothing; COPY (A5.8) into Sent or Drafts is refused.
 	assertTagged(await client.command("UID EXPUNGE 1"), "OK");
-	assertTagged(await client.command("COPY 1 Trash"), "NO", /\[CANNOT\]/);
-	assertTagged(await client.command("UID COPY 1 Trash"), "NO", /\[CANNOT\]/);
+	assertTagged(await client.command("COPY 1 Sent"), "NO", /\[CANNOT\]/);
+	assertTagged(await client.command("UID COPY 1 Drafts"), "NO", /\[CANNOT\]/);
 	assert.equal(productState(context), before);
 	// EXAMINE is read-only: MOVE is refused before any storage call.
 	await client.command("EXAMINE INBOX");

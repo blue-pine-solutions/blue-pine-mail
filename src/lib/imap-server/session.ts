@@ -1,6 +1,6 @@
 import { getDb } from "@/db";
 import { authorizeImapAccess } from "@/lib/imap/access";
-import { appendImapDraft, expungeImapFolder, fetchImapMessage, getImapChangeSignal, getImapFolderStatus, listImapMailboxes, moveImapMessages, openImapFolder, storeImapFlags, trainImapSpamFeedback } from "@/lib/imap/service";
+import { appendImapDraft, copyImapMessages, expungeImapFolder, fetchImapMessage, getImapChangeSignal, getImapFolderStatus, listImapMailboxes, moveImapMessages, openImapFolder, storeImapFlags, trainImapSpamFeedback } from "@/lib/imap/service";
 import type { ImapFlagName, ImapFlags, ImapFolderSnapshot, ImapMailbox, ImapMoveResult } from "@/lib/imap/types";
 import { ambiguousFolderIds, ImapStateError, imapFolderNameVerdict, STORABLE_FLAGS } from "@/lib/imap/utils";
 import { verifyMailAppPassword } from "@/lib/mail-app-passwords/verify";
@@ -53,7 +53,9 @@ import type { FetchItem, FramedItem, FramerLimits, ImapSessionHost, SelectedMail
  *   appendImapDraft: the message literal bypasses ordinary framing (the framer hands over an
  *   `append` item and holds; see append()), is kept byte for byte, and the tagged answer
  *   carries UIDPLUS's APPENDUID from the UID the commit read back.
- * COPY is refused before any storage call; COPYUID for COPY is owed only by a COPY, which does not exist yet.
+ * - COPY and UID COPY (A5.8) through A3's copyImapMessages: independent copies (new rows, new
+ *   raw and attachment objects, new UIDs), all or nothing, the source only read; COPYUID in the
+ *   tagged answer. Never into Sent or Drafts, never from Drafts, no spam training.
  *
  * IDLE (A5.4, RFC 2177) waits for DONE while polling the database, never a process-local
  * event: A3's getImapChangeSignal (authority, mailbox revision, UIDVALIDITY) at a jittered
@@ -103,7 +105,6 @@ export const AUTH_FAILURE_DELAY_MS = 1000;
 const SELECTED_FLAGS = "(\\Seen \\Flagged \\Deleted \\Draft)";
 const PERMANENT_FLAG_NAMES: Record<ImapFlagName, string> = { seen: "\\Seen", flagged: "\\Flagged", deleted: "\\Deleted" };
 /** Commands that would write and are not available; refused before any storage call. */
-const UNSUPPORTED_COMMANDS = new Set(["COPY"]);
 const STATUS_ITEMS = new Set(["MESSAGES", "RECENT", "UIDNEXT", "UIDVALIDITY", "UNSEEN"]);
 const MAX_ID_PAIRS = 30;
 
@@ -425,6 +426,8 @@ export class ImapSession {
 			await this.send(`${tag} NO [CANNOT] ${responseText(error.message)}`);
 		} else if (error instanceof ImapStateError && error.code === "limit") {
 			await this.send(`${tag} NO [LIMIT] ${responseText(error.message)}`);
+		} else if (error instanceof ImapStateError && error.code === "vanished") {
+			await this.send(`${tag} NO Some of the requested messages no longer exist`);
 		} else {
 			this.host.log({ event: "command.error", command, error: error instanceof Error ? error.message : String(error) });
 			await this.send(`${tag} NO [UNAVAILABLE] Temporary failure, try again later`);
@@ -627,11 +630,6 @@ export class ImapSession {
 				// An APPEND with its message literal is an `append` item (append()); this one has none.
 				throw new ImapSyntaxError("APPEND needs a message literal");
 		}
-		if (UNSUPPORTED_COMMANDS.has(command) || command === "UID COPY") {
-			// Refused before any storage call, so nothing A3 holds is touched.
-			if (/COPY/.test(command) && this.state !== "selected") return this.wrongState(tag);
-			return this.send(`${tag} NO [CANNOT] ${command} is not available on this server`);
-		}
 		if (this.state !== "selected") return this.isKnown(command) ? this.wrongState(tag) : this.send(`${tag} BAD Unknown command`);
 		switch (command) {
 			case "CHECK":
@@ -664,12 +662,15 @@ export class ImapSession {
 			case "MOVE":
 			case "UID MOVE":
 				return this.move(tag, reader, command === "UID MOVE");
+			case "COPY":
+			case "UID COPY":
+				return this.copy(tag, reader, command === "UID COPY");
 		}
 		return this.send(`${tag} BAD Unknown command`);
 	}
 
 	private isKnown(command: string): boolean {
-		return ["LIST", "LSUB", "STATUS", "SELECT", "EXAMINE", "NAMESPACE", "CHECK", "CLOSE", "UNSELECT", "FETCH", "UID FETCH", "SEARCH", "UID SEARCH", "LOGIN", "AUTHENTICATE", "STORE", "UID STORE", "COPY", "UID COPY", "MOVE", "UID MOVE", "EXPUNGE", "UID EXPUNGE", "IDLE", "CREATE", "RENAME", "DELETE", "SUBSCRIBE", "UNSUBSCRIBE", "APPEND", ...UNSUPPORTED_COMMANDS].includes(command);
+		return ["LIST", "LSUB", "STATUS", "SELECT", "EXAMINE", "NAMESPACE", "CHECK", "CLOSE", "UNSELECT", "FETCH", "UID FETCH", "SEARCH", "UID SEARCH", "LOGIN", "AUTHENTICATE", "STORE", "UID STORE", "COPY", "UID COPY", "MOVE", "UID MOVE", "EXPUNGE", "UID EXPUNGE", "IDLE", "CREATE", "RENAME", "DELETE", "SUBSCRIBE", "UNSUBSCRIBE", "APPEND"].includes(command);
 	}
 
 	// ---- any state --------------------------------------------------------------
@@ -1401,6 +1402,47 @@ export class ImapSession {
 			return this.send(`${tag} NO ${stillHere ? "Some of the requested messages could not be moved" : "Some of the requested messages no longer exist"}`);
 		}
 		await this.send(`${tag} OK ${uidMode ? "UID MOVE" : "MOVE"} completed`);
+	}
+
+	/**
+	 * COPY and UID COPY (A5.8; RFC 3501 §6.4.7, UIDPLUS COPYUID). Parsed and resolved like MOVE
+	 * (a refresh without EXPUNGE, then the set against what this session announced), but A3's
+	 * copyImapMessages creates independent copies and leaves the source as it is, all or
+	 * nothing. Content permits are this session's own (2 per user, 8 in all), held per message
+	 * while it is duplicated. COPYUID comes in the tagged answer; nothing trains the spam filter.
+	 */
+	private async copy(tag: string, reader: CommandReader, uidMode: boolean): Promise<void> {
+		reader.sp();
+		const token = reader.token();
+		if (!isSequenceSetToken(token)) throw new ImapSyntaxError("Invalid sequence set");
+		const set = parseSequenceSet(token);
+		reader.sp();
+		const requested = reader.astring();
+		reader.end();
+		const selected = this.selected!;
+		await this.refresh(false);
+		const targets = this.targets(set, uidMode);
+		if (!targets) return this.send(`${tag} BAD Invalid message sequence number`);
+		const destination = findMailbox(await this.mailboxes(), requested);
+		if (!destination) return this.send(`${tag} NO [NONEXISTENT] No such mailbox`);
+		const name = uidMode ? "UID COPY" : "COPY";
+		// A message this session still shows but that has left the folder cannot be copied, so nothing is.
+		if (targets.some((target) => selected.vanished.has(target.uid))) return this.send(`${tag} NO Some of the requested messages no longer exist`);
+		const result = await this.selectedCall(() =>
+			copyImapMessages(
+				this.env,
+				this.principal!,
+				selected.key,
+				targets.map((target) => target.uid),
+				destination.key,
+				{ acquireRead: () => this.acquireContent(), cancelled: () => this.closed },
+			),
+		);
+		this.host.log({ event: "copy", count: result.copied.length });
+		// The destination may be the selected mailbox: its new messages are reported (EXISTS).
+		await this.refresh(true);
+		const copyUid = copyUidData(result.copied);
+		await this.send(`${tag} OK ${copyUid ? `[COPYUID ${copyUid}] ` : ""}${name} completed`);
 	}
 
 	/** Post-MOVE spam training. The move has committed: a failure here is logged, never answered. */

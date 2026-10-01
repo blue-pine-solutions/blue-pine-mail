@@ -71,7 +71,7 @@ test("a5.5a: the commands need an authenticated session, add no capability, and 
 		assertTagged(await client.command(command), "BAD", undefined, command);
 	}
 	assert.equal(state(context), before);
-	assertTagged(await client.command("COPY 1 Trash"), "BAD", /not valid in this state/, "COPY stays unimplemented (and needs a selection)");
+	assertTagged(await client.command("COPY 1 Trash"), "BAD", /not valid in this state/, "COPY needs a selection");
 	// APPEND (A5.7) is Drafts only: INBOX is refused before the continuation, so no octets follow.
 	client.write("ap APPEND INBOX {1}\r\n");
 	const append = await client.collect("ap");

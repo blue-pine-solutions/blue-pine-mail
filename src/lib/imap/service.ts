@@ -1,7 +1,7 @@
 import { and, asc, eq, exists, inArray, isNull, lte, ne, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import type { AppDatabase } from "@/db";
-import { folders, jmapMailboxRevisions, messages } from "@/db/schema";
+import { folders, jmapMailboxRevisions, messageAttachments, messages } from "@/db/schema";
 import { imapMessageUids } from "@/db/schema/bluepine";
 import { sanitizeFilename, validateAttachments } from "@/lib/email/attachments";
 import { resolveCanonicalMessage } from "@/lib/email/canonical-message";
@@ -23,6 +23,7 @@ import {
 	findFolderRow,
 	hasDeletedInvariant,
 	hasDraftInvariant,
+	insertImapCopies,
 	insertImapDraft,
 	membershipCondition,
 	relocateImapMessages,
@@ -30,11 +31,12 @@ import {
 	releaseUid,
 	syncFolder,
 } from "./state";
-import type { ImapDraftAttachmentRow, ImapDraftRow, ImapFolderRow } from "./state";
+import type { ImapDraftAttachmentRow, ImapDraftRow, ImapFolderRow, ImapPlannedCopy } from "./state";
 import type {
 	ImapAccess,
 	ImapAppendResult,
 	ImapChangeSignal,
+	ImapCopyResult,
 	ImapDraftAppend,
 	ImapFlagChanges,
 	ImapFlagName,
@@ -58,7 +60,11 @@ import {
 	FLAG_STORE_CHUNK,
 	flagsFor,
 	ImapStateError,
+	imapCopyTarget,
 	imapMoveTarget,
+	IN_LIST_CHUNK,
+	MAX_COPY_BYTES,
+	MAX_COPY_MESSAGES,
 	isPermanentlyExpungeable,
 	parseFolderKey,
 	PERMANENT_DELETE_CHUNK,
@@ -895,4 +901,169 @@ export async function appendImapDraft(env: CloudflareEnv, principal: ImapPrincip
 		throw new ImapStateError("denied", "This access does not allow creating drafts");
 	}
 	return { messageId: id, ...committed };
+}
+
+/** What a COPY's caller provides: the content-read permit to hold while a message is duplicated, and whether the client is still there. */
+export type ImapCopyOptions = {
+	acquireRead?: () => Promise<() => void>;
+	cancelled?: () => boolean;
+};
+
+/**
+ * COPY and UID COPY (A5.8): copy the messages that `uids` name in folder `key` into folder
+ * `destinationKey` of the same mailbox. A copy is an independent message: a new `messages`
+ * row, a new raw object (`copies/<id>.eml`) holding exactly the octets the source UID serves,
+ * new attachment objects and rows, and a new UID in the destination. The source is only read.
+ * Objects are never shared, because deleting a message (web, JMAP, A1 or IMAP) removes the
+ * objects its row names.
+ *
+ * - Refusals come first and copy nothing: `denied` without management access, `unsupported`
+ *   where imapCopyTarget refuses (Sent or Drafts as destination, Drafts as source, outbound
+ *   mail into Spam), `nonexistent-destination`, `limit` above MAX_COPY_MESSAGES, and
+ *   `vanished` when a named message is no longer in the folder.
+ * - Then each message is duplicated in turn, holding a content-read permit (`acquireRead`) while
+ *   its octets are read and written, so at most one message is in memory. The octets are the
+ *   ones FETCH serves for the source UID (its bound canonical object); a source without stored
+ *   octets fails the whole COPY as `unavailable` rather than storing generated MIME. The bytes
+ *   duplicated (raw plus attachments) count against MAX_COPY_BYTES (`limit`).
+ * - Then authority is re-checked and one guarded batch commits every copy or none
+ *   (insertImapCopies). Read, starred, INTERNALDATE and thread are the source's at commit; the
+ *   copy is not snoozed and carries no \Deleted mark. Nothing trains the spam filter.
+ * - On any failure, or when the client went away (`cancelled`) before the commit, every object
+ *   written is removed (best effort) and nothing is committed. The error says why: `forbidden`
+ *   (access gone), `denied`, `vanished` (a source moved or expunged meanwhile),
+ *   `nonexistent-destination` (the destination deleted meanwhile) or `unavailable`.
+ *
+ * Returns the copies in ascending source UID order with the destination UIDs and UIDVALIDITY
+ * read back inside the commit (COPYUID); empty when `uids` names nothing.
+ */
+export async function copyImapMessages(env: CloudflareEnv, principal: ImapPrincipal, key: ImapFolderKey, uids: number[], destinationKey: ImapFolderKey, options: ImapCopyOptions = {}): Promise<ImapCopyResult> {
+	const wanted = [...new Set(uids.filter((uid) => Number.isInteger(uid) && uid >= 1))].sort((a, b) => a - b);
+	const opened = await open(env, principal, key);
+	const { db, access } = opened;
+	if (!access.canManage) throw new ImapStateError("denied", "This access does not allow copying messages");
+	const destination = await resolveMailbox(db, access, destinationKey, opened);
+	if (!destination) throw new ImapStateError("nonexistent-destination", "No such destination mailbox");
+	const rule = imapCopyTarget(opened.mailbox.key, destination.key);
+	if ("refusal" in rule) throw new ImapStateError("unsupported", rule.refusal);
+	if (!wanted.length) return { copied: [] };
+	if (wanted.length > MAX_COPY_MESSAGES) throw new ImapStateError("limit", `At most ${MAX_COPY_MESSAGES} messages can be copied at once`);
+	const folder = await findFolderRow(db, access.mailboxId, opened.mailbox.key);
+	if (!folder) throw new ImapStateError("vanished", "Some of the requested messages no longer exist");
+
+	const sources: Array<{ uid: number; messageId: string; direction: string }> = [];
+	for (const uidChunk of chunk(wanted, IN_LIST_CHUNK - 10)) {
+		sources.push(
+			...(await db
+				.select({ uid: imapMessageUids.uid, messageId: messages.id, direction: messages.direction })
+				.from(imapMessageUids)
+				.innerJoin(messages, eq(messages.id, imapMessageUids.messageId))
+				.where(and(eq(imapMessageUids.imapFolderId, folder.id), inArray(imapMessageUids.uid, uidChunk), membershipCondition(access.mailboxId, opened.mailbox.key)))),
+		);
+	}
+	if (sources.length !== wanted.length) throw new ImapStateError("vanished", "Some of the requested messages no longer exist");
+	if (destination.key === "junk" && sources.some((source) => source.direction !== "inbound")) throw new ImapStateError("unsupported", "Sent mail cannot be copied to Spam");
+	sources.sort((a, b) => a.uid - b.uid);
+
+	const written: string[] = [];
+	const removeWritten = async () => {
+		for (const objectKey of written) {
+			try {
+				await env.BUCKET.delete(objectKey);
+			} catch (error) {
+				console.warn(`IMAP COPY could not remove ${objectKey} of an uncommitted copy`, error instanceof Error ? error.message : error);
+			}
+		}
+	};
+	const planned: ImapPlannedCopy[] = [];
+	let total = 0;
+	const count = (size: number) => {
+		total += size;
+		if (total > MAX_COPY_BYTES) throw new ImapStateError("limit", `At most ${MAX_COPY_BYTES} octets can be copied at once`);
+	};
+	try {
+		for (const source of sources) {
+			if (options.cancelled?.()) throw new ImapStateError("unavailable", "The client went away");
+			const release = (await options.acquireRead?.()) ?? (() => {});
+			try {
+				// Exactly the octets FETCH serves for the source UID; a transient (generated) representation is refused.
+				const content = await fetchImapMessage(env, principal, opened.mailbox.key, source.uid);
+				if (!content || content.messageId !== source.messageId) throw new ImapStateError("vanished", "Some of the requested messages no longer exist");
+				count(content.size);
+				const id = newId("msg");
+				const rawR2Key = `copies/${id}.eml`;
+				written.push(rawR2Key);
+				await env.BUCKET.put(rawR2Key, content.bytes, { httpMetadata: { contentType: "message/rfc822" }, customMetadata: { userId: access.userId, messageId: id } });
+				const attachments: ImapPlannedCopy["attachments"] = [];
+				const rows = await db.select().from(messageAttachments).where(eq(messageAttachments.messageId, source.messageId));
+				for (const row of rows) {
+					const object = await env.BUCKET.get(row.r2Key);
+					if (!object) throw new ImapStateError("unavailable", `Attachment ${row.id} of message ${source.messageId} is missing from storage`);
+					const bytes = await object.arrayBuffer();
+					count(bytes.byteLength);
+					const attachmentId = newId("att");
+					const r2Key = `attachments/${id}/${attachmentId}/${sanitizeFilename(row.filename)}`;
+					written.push(r2Key);
+					await env.BUCKET.put(r2Key, bytes, { httpMetadata: { contentType: row.contentType }, customMetadata: { filename: row.filename, messageId: id } });
+					attachments.push({ sourceId: row.id, id: attachmentId, r2Key });
+				}
+				planned.push({ sourceUid: source.uid, sourceMessageId: source.messageId, id, rawR2Key, size: content.size, attachments });
+			} finally {
+				release();
+			}
+		}
+		if (options.cancelled?.()) throw new ImapStateError("unavailable", "The client went away");
+	} catch (error) {
+		await removeWritten();
+		if (error instanceof ImapStateError) throw error;
+		throw new ImapStateError("unavailable", `Copies could not be stored: ${error instanceof Error ? error.message : String(error)}`);
+	}
+
+	// Authority again after the (possibly long) duplication, then inside the commit itself.
+	const recheck = await authorizeImapAccess(db, principal);
+	if (!recheck || !recheck.canManage) {
+		await removeWritten();
+		throw recheck ? new ImapStateError("denied", "This access does not allow copying messages") : new ImapStateError("forbidden", "Mailbox access denied");
+	}
+	let committed: Map<string, { uid: number; uidValidity: number }>;
+	try {
+		committed = await insertImapCopies(
+			db,
+			{ userId: access.userId, mailboxId: access.mailboxId, appPasswordId: principal.appPasswordId, sharedAccess: isMailboxSharingEnabled() },
+			{ folderId: folder.id, key: opened.mailbox.key },
+			{ key: destination.key, ...rule.target },
+			planned,
+		);
+	} catch (error) {
+		await removeWritten();
+		// The batch committed nothing; say why if the reason is visible now.
+		const after = await authorizeImapAccess(db, principal).catch(() => undefined);
+		if (after === null) throw new ImapStateError("forbidden", "Mailbox access denied");
+		if (after && !after.canManage) throw new ImapStateError("denied", "This access does not allow copying messages");
+		if (after && !(await resolveMailbox(db, after, destination.key, opened).catch(() => null))) throw new ImapStateError("nonexistent-destination", "No such destination mailbox");
+		const remaining = after ? await countSources(db, folder.id, access.mailboxId, opened.mailbox.key, planned).catch(() => planned.length) : planned.length;
+		if (remaining !== planned.length) throw new ImapStateError("vanished", "Some of the requested messages no longer exist");
+		throw new ImapStateError("unavailable", `The copy could not be committed: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	return {
+		copied: planned.map((copy) => {
+			const placed = committed.get(copy.id);
+			return { uid: copy.sourceUid, messageId: copy.sourceMessageId, destinationUid: placed?.uid ?? null, destinationUidValidity: placed?.uidValidity ?? null };
+		}),
+	};
+}
+
+/** How many planned sources still are where the copy found them (the UID still names the message, which is still in the folder). */
+async function countSources(db: AppDatabase, folderId: string, mailboxId: string, key: ImapFolderKey, planned: ImapPlannedCopy[]): Promise<number> {
+	let found = 0;
+	for (const plannedChunk of chunk(planned, IN_LIST_CHUNK - 10)) {
+		const rows = await db
+			.select({ uid: imapMessageUids.uid, messageId: imapMessageUids.messageId })
+			.from(imapMessageUids)
+			.innerJoin(messages, eq(messages.id, imapMessageUids.messageId))
+			.where(and(eq(imapMessageUids.imapFolderId, folderId), inArray(imapMessageUids.uid, plannedChunk.map((copy) => copy.sourceUid)), membershipCondition(mailboxId, key)));
+		const expected = new Map(plannedChunk.map((copy) => [copy.sourceUid, copy.sourceMessageId]));
+		found += rows.filter((row) => expected.get(row.uid) === row.messageId).length;
+	}
+	return found;
 }

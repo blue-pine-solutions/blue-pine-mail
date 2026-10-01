@@ -55,6 +55,7 @@ export async function loadApp(name) {
 				export { storeMessageAttachments, deleteMessageAttachment } from "./src/lib/email/attachments.ts";
 				export { cleanupDeletedMessageObjects } from "./src/lib/imap/cleanup.ts";
 				export * as imapState from "./src/lib/imap/state.ts";
+				export { GET as messagesListRoute } from "./src/app/api/messages/route.ts";
 				export * as imapUtils from "./src/lib/imap/utils.ts";
 				export * as folderManagement from "./src/lib/mailboxes/folder-management.ts";
 				export { getDb } from "./src/db/index.ts";

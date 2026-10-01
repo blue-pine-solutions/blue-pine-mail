@@ -548,15 +548,23 @@ test("a5.6 E: a stalled whole-message FETCH holds about one copy of the message"
 	const size = 16 * 1024 * 1024;
 	await context.deliver("m-1", bigMessage(size));
 	const { client, session, gate } = await gatedSession(context);
-	const used = () => {
-		gc();
-		const memory = process.memoryUsage();
-		return memory.heapUsed + memory.arrayBuffers;
+	// What is still live: the lowest of a few collections a turn apart. Reading the octets leaves
+	// stream chunks whose backing stores V8 releases after a collection, later under load; a single
+	// gc() can still count them. Anything really retained stays in every reading.
+	const used = async () => {
+		let lowest = Infinity;
+		for (let round = 0; round < 3; round += 1) {
+			gc();
+			await new Promise((resolve) => setImmediate(resolve));
+			const memory = process.memoryUsage();
+			lowest = Math.min(lowest, memory.heapUsed + memory.arrayBuffers);
+		}
+		return lowest;
 	};
-	const before = used();
+	const before = await used();
 	client.write("f1 FETCH 1 BODY.PEEK[]\r\n");
 	await until(() => gate.held.length > 0, 10_000, "the stalled write");
-	const during = used();
+	const during = await used();
 	const ratio = (during - before) / size;
 	t.diagnostic(`stalled 16 MiB FETCH retains ${ratio.toFixed(2)}x`);
 	assert.ok(ratio < 1.3, `a stalled 16 MiB FETCH retains ${ratio.toFixed(2)}x the message`);
