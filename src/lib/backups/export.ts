@@ -16,7 +16,7 @@ const REQUIRED_BACKUP_TABLES: DatabaseBackupTable[] = ["users", "domains", "mail
  * `includedTables` lists a table it does not know and ignores extra `tables` entries, so a
  * Blue Pine backup still restores there, without the Blue Pine data.
  */
-const DOWNSTREAM_BACKUP_TABLES: DatabaseBackupTable[] = ["mail_app_passwords", "imap_folders", "imap_message_uids"];
+const DOWNSTREAM_BACKUP_TABLES: DatabaseBackupTable[] = ["mail_app_passwords", "imap_folders", "imap_message_uids", "imap_unsubscribed_folders"];
 const ALL_BACKUP_TABLES: DatabaseBackupTable[] = [...BACKUP_TABLES, ...DOWNSTREAM_BACKUP_TABLES];
 const INSERT_BATCH_SIZE = 50;
 

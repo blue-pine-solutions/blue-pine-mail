@@ -233,7 +233,7 @@ test("a migrated database has the Blue Pine table, indexes and triggers, and eve
 		"bp_mail_app_passwords_revoke_on_access_removal",
 		"bp_mail_app_passwords_revoke_on_password_change",
 	]);
-	for (const index of ["mail_app_passwords_public_id_idx", "imap_folders_mailbox_key_idx", "imap_message_uids_folder_message_idx", "imap_message_uids_message_idx"]) assert.ok(names("index").includes(index), index);
+	for (const index of ["mail_app_passwords_public_id_idx", "imap_folders_mailbox_key_idx", "imap_message_uids_folder_message_idx", "imap_message_uids_message_idx", "imap_unsubscribed_folders_mailbox_idx"]) assert.ok(names("index").includes(index), index);
 	const covered = await app.assertBackupTablesCoverDatabase(database);
 	for (const table of downstreamTables) assert.ok(covered.has(table));
 	const exportSource = read("src/lib/backups/export.ts");
@@ -275,7 +275,7 @@ test("bp0004's content trigger watches exactly the columns draftFingerprint dige
 	assert.equal(sources.stdout.trim(), "", "no code updates message_attachments rows in place (bp0004 watches INSERT and DELETE only)");
 });
 
-test("bp0004 upgrade: a database at bp0003 applies exactly bp0004 on both runners, a restart applies nothing, and it ends with the fresh schema", async (t) => {
+test("bp0004 upgrade: a database at bp0003 applies exactly bp0004 (and the Blue Pine migrations after it) on both runners, a restart applies nothing, and it ends with the fresh schema", async (t) => {
 	const bp0004 = "bp0004_release_imap_draft_uid_on_content_change.sql";
 	assert.ok(downstreamFiles.includes(bp0004));
 	const before = mkdtempSync(join(tmpdir(), "mailflare-pre-bp0004-"));
@@ -289,14 +289,56 @@ test("bp0004 upgrade: a database at bp0003 applies exactly bp0004 on both runner
 	const node = openDatabase(t);
 	await app.applyMigrations(node, before);
 	assert.equal(node.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'bp_imap_draft_%'").get().n, 0);
-	assert.deepEqual(await app.applyMigrations(node, migrationsDirectory), [bp0004], "Node runner: exactly bp0004");
+	// bp0004 and the Blue Pine migrations after it (bp0005 onward), nothing else.
+	const fromBp0004 = downstreamFiles.slice(downstreamFiles.indexOf(bp0004));
+	assert.deepEqual(await app.applyMigrations(node, migrationsDirectory), fromBp0004, "Node runner: exactly bp0004 and its successors");
 	assert.deepEqual(await app.applyMigrations(node, migrationsDirectory), [], "a restart applies nothing");
 	assert.deepEqual(schema(node), schema(fresh));
 
 	const workers = openDatabase(t);
 	await app.applyMigrations(workers, before);
-	assert.deepEqual((await app.getMigrationStatus(workers)).pending, [bp0004]);
-	assert.deepEqual((await app.applyPendingMigrations(workers)).applied, [bp0004], "Workers runner: exactly bp0004");
+	assert.deepEqual((await app.getMigrationStatus(workers)).pending, fromBp0004);
+	assert.deepEqual((await app.applyPendingMigrations(workers)).applied, fromBp0004, "Workers runner: exactly bp0004 and its successors");
 	assert.deepEqual((await app.applyPendingMigrations(workers)).applied, []);
 	assert.deepEqual(schema(workers).filter((row) => row.type === "trigger").map((row) => [row.name, row.sql.replace(/\s+/g, " ")]), schema(fresh).filter((row) => row.type === "trigger").map((row) => [row.name, row.sql.replace(/\s+/g, " ")]), "the bundle runner installs the same triggers");
+});
+
+test("bp0005 upgrade: a database at bp0004 with data applies exactly bp0005 on both runners, keeps every row, starts with every mailbox subscribed, and ends with the fresh schema", async (t) => {
+	const bp0005 = "bp0005_add_imap_subscriptions.sql";
+	assert.ok(downstreamFiles.includes(bp0005));
+	const before = mkdtempSync(join(tmpdir(), "mailflare-pre-bp0005-"));
+	t.after(() => rmSync(before, { recursive: true, force: true }));
+	cpSync(migrationsDirectory, before, { recursive: true });
+	for (const name of downstreamFiles.slice(downstreamFiles.indexOf(bp0005))) rmSync(join(before, name));
+	const schema = (database) => database.db.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
+	const seed = (database) =>
+		database.db.exec(`
+			INSERT INTO users (id, email, password_hash, name, role, created_at) VALUES ('user-a', 'a@example.test', 'h', 'A', 'admin', 1);
+			INSERT INTO domains (id, user_id, hostname, zone_id, status, created_at) VALUES ('domain-1', 'user-a', 'example.test', 'manual', 'active', 1);
+			INSERT INTO mailboxes (id, user_id, domain_id, local_part, type, created_at) VALUES ('mbx-a', 'user-a', 'domain-1', 'a', 'personal', 1);
+			INSERT INTO imap_folders (id, mailbox_id, folder_key, uid_validity, uid_next, created_at) VALUES ('imf-1', 'mbx-a', 'archive', 1790000000, 5, 1);
+		`);
+	const fresh = openDatabase(t);
+	await app.applyMigrations(fresh, migrationsDirectory);
+
+	const node = openDatabase(t);
+	await app.applyMigrations(node, before);
+	seed(node);
+	assert.equal(node.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'imap_unsubscribed_folders'").get().n, 0);
+	assert.deepEqual(await app.applyMigrations(node, migrationsDirectory), [bp0005], "Node runner: exactly bp0005");
+	assert.deepEqual(await app.applyMigrations(node, migrationsDirectory), [], "a restart applies nothing");
+	assert.deepEqual(schema(node), schema(fresh));
+	assert.equal(node.db.prepare("SELECT COUNT(*) AS n FROM imap_unsubscribed_folders").get().n, 0, "no row: every existing mailbox stays subscribed");
+	assert.deepEqual(node.db.prepare("SELECT folder_key, uid_validity, uid_next FROM imap_folders").all(), [{ folder_key: "archive", uid_validity: 1790000000, uid_next: 5 }], "existing IMAP state is untouched");
+	// The table follows its anchors: deleting the mailbox or the user removes their rows.
+	node.db.exec("INSERT INTO imap_unsubscribed_folders (user_id, mailbox_id, folder_key, created_at) VALUES ('user-a', 'mbx-a', 'archive', 1)");
+	node.db.exec("DELETE FROM mailboxes WHERE id = 'mbx-a'");
+	assert.equal(node.db.prepare("SELECT COUNT(*) AS n FROM imap_unsubscribed_folders").get().n, 0, "cascades with the mailbox");
+
+	const workers = openDatabase(t);
+	await app.applyMigrations(workers, before);
+	assert.deepEqual((await app.getMigrationStatus(workers)).pending, [bp0005]);
+	assert.deepEqual((await app.applyPendingMigrations(workers)).applied, [bp0005], "Workers runner: exactly bp0005");
+	assert.deepEqual((await app.applyPendingMigrations(workers)).applied, []);
+	assert.deepEqual(schema(workers).filter((row) => row.name.startsWith("imap_unsubscribed_folders")).map((row) => [row.type, row.name]), schema(fresh).filter((row) => row.name.startsWith("imap_unsubscribed_folders")).map((row) => [row.type, row.name]), "the bundle runner creates the same table and index");
 });

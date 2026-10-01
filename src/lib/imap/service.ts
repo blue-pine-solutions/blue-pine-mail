@@ -2,7 +2,7 @@ import { and, asc, eq, exists, inArray, isNull, lte, ne, sql } from "drizzle-orm
 import { getDb } from "@/db";
 import type { AppDatabase } from "@/db";
 import { folders, jmapMailboxRevisions, messageAttachments, messages } from "@/db/schema";
-import { imapMessageUids } from "@/db/schema/bluepine";
+import { imapMessageUids, imapUnsubscribedFolders } from "@/db/schema/bluepine";
 import { sanitizeFilename, validateAttachments } from "@/lib/email/attachments";
 import { resolveCanonicalMessage } from "@/lib/email/canonical-message";
 import type { CanonicalRow } from "@/lib/email/canonical-message-types";
@@ -25,6 +25,7 @@ import {
 	hasDraftInvariant,
 	insertImapCopies,
 	insertImapDraft,
+	recordImapUnsubscription,
 	membershipCondition,
 	relocateImapMessages,
 	releaseStaleDraftUids,
@@ -177,6 +178,51 @@ async function listMailboxes(db: AppDatabase, access: ImapAccess, allowed: Delet
 	];
 }
 
+/**
+ * IMAP subscriptions (A5.5b): the keys of the folders the principal's user has unsubscribed
+ * from in this mailbox, sorted. Every other visible folder is subscribed: that is how mailboxes
+ * behaved before subscriptions were stored, so an upgrade changes nothing a client sees, and a
+ * folder created on any surface (web, JMAP, IMAP) is subscribed. The state is the user's, for
+ * this mailbox account: another user of a shared mailbox has their own, and a new app password
+ * of the same user sees the same. Rows of custom folders that no longer exist are removed by
+ * listImapMailboxes and never returned here.
+ */
+export async function listImapUnsubscribed(env: CloudflareEnv, principal: ImapPrincipal): Promise<ImapFolderKey[]> {
+	const db = getDb(env);
+	const access = await authorizeImapAccess(db, principal);
+	if (!access) throw new ImapStateError("forbidden", "Mailbox access denied");
+	const rows = await db
+		.select({ key: imapUnsubscribedFolders.folderKey })
+		.from(imapUnsubscribedFolders)
+		.where(and(eq(imapUnsubscribedFolders.userId, access.userId), eq(imapUnsubscribedFolders.mailboxId, access.mailboxId)))
+		.orderBy(asc(imapUnsubscribedFolders.folderKey));
+	return rows.map((row) => row.key as ImapFolderKey);
+}
+
+/**
+ * SUBSCRIBE (`subscribed`) or UNSUBSCRIBE folder `key` for the principal's user in this mailbox
+ * (A5.5b). Reading the mailbox is the authority needed, as for any view preference: it changes
+ * nothing anyone else sees. `forbidden` when access is gone (checked first, and again in SQL by
+ * readerGuard for the write that records state), `nonexistent` for a folder that is not, or no
+ * longer, in this mailbox. Both directions are idempotent.
+ */
+export async function setImapSubscription(env: CloudflareEnv, principal: ImapPrincipal, key: ImapFolderKey, subscribed: boolean): Promise<void> {
+	const db = getDb(env);
+	const access = await authorizeImapAccess(db, principal);
+	if (!access) throw new ImapStateError("forbidden", "Mailbox access denied");
+	if (!(await resolveMailbox(db, access, key, await deletability(db, access)))) throw new ImapStateError("nonexistent", "No such folder");
+	if (subscribed) {
+		// Removing the principal's own row can reveal or change nothing for anyone else.
+		await db.delete(imapUnsubscribedFolders).where(and(eq(imapUnsubscribedFolders.userId, access.userId), eq(imapUnsubscribedFolders.mailboxId, access.mailboxId), eq(imapUnsubscribedFolders.folderKey, key)));
+		return;
+	}
+	const authority = { userId: access.userId, mailboxId: access.mailboxId, appPasswordId: principal.appPasswordId, sharedAccess: isMailboxSharingEnabled() };
+	if (await recordImapUnsubscription(db, authority, key)) return;
+	// The guarded write recorded nothing: access or the folder went away after the checks above.
+	if (!(await authorizeImapAccess(db, principal))) throw new ImapStateError("forbidden", "Mailbox access denied");
+	throw new ImapStateError("nonexistent", "No such folder");
+}
+
 /** The IMAP-visible folders of the principal's mailbox, system folders first. */
 export async function listImapMailboxes(env: CloudflareEnv, principal: ImapPrincipal): Promise<ImapMailbox[]> {
 	const db = getDb(env);
@@ -190,6 +236,13 @@ export async function listImapMailboxes(env: CloudflareEnv, principal: ImapPrinc
 			WHERE mailbox_id = ${access.mailboxId} AND folder_key LIKE 'f:%'
 				AND substr(folder_key, 3) NOT IN (SELECT id FROM folders WHERE mailbox_id = ${access.mailboxId})
 		)
+	`);
+	// Likewise every user's subscription state for those folders (A5.5b): a folder id is never
+	// reused, so such a row can never apply to another folder, and none is left behind.
+	await db.run(sql`
+		DELETE FROM imap_unsubscribed_folders
+		WHERE mailbox_id = ${access.mailboxId} AND folder_key LIKE 'f:%'
+			AND substr(folder_key, 3) NOT IN (SELECT id FROM folders WHERE mailbox_id = ${access.mailboxId})
 	`);
 	return listMailboxes(db, access, await deletability(db, access));
 }

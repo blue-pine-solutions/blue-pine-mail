@@ -1,6 +1,6 @@
 import { getDb } from "@/db";
 import { authorizeImapAccess } from "@/lib/imap/access";
-import { appendImapDraft, copyImapMessages, expungeImapFolder, fetchImapMessage, getImapChangeSignal, getImapFolderStatus, listImapMailboxes, moveImapMessages, openImapFolder, storeImapFlags, trainImapSpamFeedback } from "@/lib/imap/service";
+import { appendImapDraft, copyImapMessages, expungeImapFolder, fetchImapMessage, getImapChangeSignal, getImapFolderStatus, listImapMailboxes, listImapUnsubscribed, moveImapMessages, openImapFolder, setImapSubscription, storeImapFlags, trainImapSpamFeedback } from "@/lib/imap/service";
 import type { ImapFlagName, ImapFlags, ImapFolderSnapshot, ImapMailbox, ImapMoveResult } from "@/lib/imap/types";
 import { ambiguousFolderIds, ImapStateError, imapFolderNameVerdict, STORABLE_FLAGS } from "@/lib/imap/utils";
 import { verifyMailAppPassword } from "@/lib/mail-app-passwords/verify";
@@ -824,9 +824,12 @@ export class ImapSession {
 			return this.send(`${tag} OK LIST completed`);
 		}
 		const matches = listMatcher(reference + pattern);
-		for (const mailbox of await this.mailboxes()) {
+		const mailboxes = await this.mailboxes();
+		// LSUB (A5.5b): every mailbox but those this user unsubscribed from in this mailbox account.
+		const unsubscribed = subscribed ? new Set(await listImapUnsubscribed(this.env, this.principal!)) : null;
+		for (const mailbox of mailboxes) {
 			const wire = wireName(mailbox);
-			if (!matches(wire)) continue;
+			if (!matches(wire) || unsubscribed?.has(mailbox.key)) continue;
 			const attributes = ["\\Noinferiors"];
 			if (!subscribed && mailbox.specialUse) attributes.push(SPECIAL_USE_ATTRIBUTE[mailbox.specialUse]);
 			await this.host.write(new ResponseBuilder().raw(`* ${name} (${attributes.join(" ")}) NIL `).string(wire).raw("\r\n").bytes());
@@ -1001,18 +1004,21 @@ export class ImapSession {
 	}
 
 	/**
-	 * SUBSCRIBE and UNSUBSCRIBE (A5.5a compatibility): there is no stored subscription state and
-	 * every visible mailbox is subscribed (LSUB lists them all). SUBSCRIBE of a visible mailbox is
-	 * therefore true and OK; UNSUBSCRIBE cannot take effect and says so. Reading the mailbox is
-	 * enough (a preference, not a change to the mailbox); nothing is written.
+	 * SUBSCRIBE and UNSUBSCRIBE (A5.5b): stored per user and mailbox account by A3
+	 * (setImapSubscription), keyed by the folder's stable identity, so a rename keeps the state
+	 * and LSUB reflects it from any later connection. Every visible mailbox is subscribed until
+	 * unsubscribed. Reading the mailbox is enough (a preference that changes nothing anyone else
+	 * sees); a name that is not one of this mailbox's folders is NONEXISTENT, and lost access ends
+	 * the session as everywhere. Both are idempotent.
 	 */
 	private async subscribe(tag: string, reader: CommandReader, subscribe: boolean): Promise<void> {
 		reader.sp();
 		const requested = reader.astring();
 		reader.end();
-		if (!findMailbox(await this.mailboxes(), requested)) return this.send(`${tag} NO [NONEXISTENT] No such mailbox`);
-		if (subscribe) return this.send(`${tag} OK SUBSCRIBE completed`);
-		return this.send(`${tag} NO [CANNOT] All mailboxes are always subscribed`);
+		const mailbox = findMailbox(await this.mailboxes(), requested);
+		if (!mailbox) return this.send(`${tag} NO [NONEXISTENT] No such mailbox`);
+		await setImapSubscription(this.env, this.principal!, mailbox.key, subscribe);
+		return this.send(`${tag} OK ${subscribe ? "SUBSCRIBE" : "UNSUBSCRIBE"} completed`);
 	}
 
 	private async select(tag: string, reader: CommandReader, command: string): Promise<void> {

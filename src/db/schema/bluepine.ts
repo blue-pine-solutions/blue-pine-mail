@@ -87,3 +87,25 @@ export const imapMessageUids = sqliteTable(
 		index("imap_message_uids_message_idx").on(t.messageId),
 	],
 );
+
+/**
+ * IMAP subscriptions (A5.5b, bp0005): the folders a user has unsubscribed from in one mailbox
+ * account. Every folder is subscribed unless a row says otherwise. `folderKey` is A3's stable
+ * key (a system role or `f:<folder id>`), never a display name.
+ */
+export const imapUnsubscribedFolders = sqliteTable(
+	"imap_unsubscribed_folders",
+	{
+		userId: text("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		mailboxId: text("mailbox_id")
+			.notNull()
+			.references(() => mailboxes.id, { onDelete: "cascade" }),
+		folderKey: text("folder_key").notNull(),
+		createdAt: integer("created_at", { mode: "timestamp" })
+			.notNull()
+			.$defaultFn(() => new Date()),
+	},
+	(t) => [primaryKey({ columns: [t.userId, t.mailboxId, t.folderKey] }), index("imap_unsubscribed_folders_mailbox_idx").on(t.mailboxId, t.folderKey)],
+);

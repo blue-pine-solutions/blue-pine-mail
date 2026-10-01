@@ -355,6 +355,49 @@ function authorityGuard(authority: ImapDeletionAuthority): SQL {
 	`;
 }
 
+/**
+ * "This principal may still read this mailbox", in SQL: the conditions authorizeImapAccess
+ * evaluates (the user enabled; the mail app password, when named, still issued to this user for
+ * this mailbox with the `imap` scope; the mailbox enabled and owned, or shared with this user at
+ * any permission while sharing is enabled). For writes that only record the principal's own
+ * preferences (IMAP subscriptions, A5.5b), where reading is the authority needed.
+ */
+export function readerGuard(authority: ImapDeletionAuthority): SQL {
+	const { userId, mailboxId } = authority;
+	const credential = authority.appPasswordId === undefined
+		? sql``
+		: sql`AND EXISTS (SELECT 1 FROM mail_app_passwords WHERE mail_app_passwords.id = ${authority.appPasswordId} AND mail_app_passwords.user_id = ${userId} AND mail_app_passwords.mailbox_id = ${mailboxId} AND json_valid(mail_app_passwords.scopes) AND EXISTS (SELECT 1 FROM json_each(mail_app_passwords.scopes) WHERE json_each.value = 'imap'))`;
+	const delegated = authority.sharedAccess
+		? sql`OR (mailboxes.type = 'shared' AND EXISTS (SELECT 1 FROM mailbox_access WHERE mailbox_access.mailbox_id = mailboxes.id AND mailbox_access.user_id = ${userId}))`
+		: sql``;
+	return sql`
+		EXISTS (SELECT 1 FROM users WHERE users.id = ${userId} AND users.disabled = 0)
+		${credential}
+		AND EXISTS (SELECT 1 FROM mailboxes WHERE mailboxes.id = ${mailboxId} AND mailboxes.disabled = 0 AND (mailboxes.user_id = ${userId} ${delegated}))
+	`;
+}
+
+/**
+ * Record that the principal unsubscribed from folder `key` of its mailbox (A5.5b), in one
+ * statement guarded by readerGuard and, for a custom folder, by the folder still existing in
+ * that mailbox, so lost access or a folder deleted meanwhile records nothing. Idempotent: an
+ * existing unsubscription is kept as it is. Returns whether the folder is now unsubscribed.
+ */
+export async function recordImapUnsubscription(db: AppDatabase, authority: ImapDeletionAuthority, key: ImapFolderKey): Promise<boolean> {
+	const parsed = parseFolderKey(key);
+	if (!parsed) return false;
+	const folderGuard = parsed.kind === "folder" ? sql`EXISTS (SELECT 1 FROM folders WHERE folders.id = ${parsed.folderId} AND folders.mailbox_id = ${authority.mailboxId})` : sql`1`;
+	const [, row] = await batchSql(db, [
+		sql`
+			INSERT OR IGNORE INTO imap_unsubscribed_folders (user_id, mailbox_id, folder_key, created_at)
+			SELECT ${authority.userId}, ${authority.mailboxId}, ${key}, ${nowSeconds()}
+			WHERE ${readerGuard(authority)} AND ${folderGuard}
+		`,
+		sql`SELECT COUNT(*) AS n FROM imap_unsubscribed_folders WHERE user_id = ${authority.userId} AND mailbox_id = ${authority.mailboxId} AND folder_key = ${key}`,
+	]);
+	return Number((row.results as Array<{ n: number }>)[0]?.n ?? 0) > 0;
+}
+
 export type ImapPermanentDeletion = {
 	/** Source UIDs released by this batch: their message is gone from the folder (deleted here or earlier, or moved away). */
 	released: number[];

@@ -386,11 +386,12 @@ test("a5.5a: an ASCII case variant taken between the check and the write is refu
 
 // ---- SUBSCRIBE / UNSUBSCRIBE / LSUB -------------------------------------------------------------------
 
-test("a5.5a SUBSCRIBE is OK for any visible mailbox (reading is enough); UNSUBSCRIBE is CANNOT; neither writes anything", async (t) => {
+test("a5.5a SUBSCRIBE and UNSUBSCRIBE are OK for any visible mailbox (reading is enough) and never touch folders or messages", async (t) => {
 	const context = await setup(t);
 	const before = state(context);
 	for (const name of ["INBOX", "inbox", "Trash", "Work"]) assertTagged(await context.client.command(`SUBSCRIBE ${name}`), "OK", /SUBSCRIBE completed/, name);
-	for (const name of ["Work", "INBOX"]) assertTagged(await context.client.command(`UNSUBSCRIBE ${name}`), "NO", /^t\d+ NO \[CANNOT\] All mailboxes are always subscribed$/, name);
+	// Stored since A5.5b (certified in imap-subscriptions.test.mjs).
+	for (const name of ["Work", "INBOX"]) assertTagged(await context.client.command(`UNSUBSCRIBE ${name}`), "OK", /^t\d+ OK UNSUBSCRIBE completed$/, name);
 	for (const command of ["SUBSCRIBE Nowhere", "UNSUBSCRIBE Nowhere", "SUBSCRIBE Private", "UNSUBSCRIBE Private"]) assertTagged(await context.client.command(command), "NO", /\[NONEXISTENT\]/, command);
 	assert.equal(state(context), before);
 	for (const permission of ["read_only", "full_access"]) {
@@ -401,7 +402,7 @@ test("a5.5a SUBSCRIBE is OK for any visible mailbox (reading is enough); UNSUBSC
 	}
 });
 
-test("a5.5a LSUB still lists every visible mailbox, with LIST's wildcards; a deleted mailbox disappears (the documented deviation)", async (t) => {
+test("a5.5a LSUB lists every visible mailbox until one is unsubscribed (A5.5b), with LIST's wildcards; a deleted mailbox disappears (the documented deviation)", async (t) => {
 	const context = await setup(t);
 	assertTagged(await context.client.command("CREATE Wanted"), "OK");
 	const list = await listed(context.client, 'LIST "" "*"');
@@ -462,7 +463,7 @@ test("a5.5a listener: CREATE with a literal, RENAME, SUBSCRIBE/UNSUBSCRIBE and D
 	assertTagged(await client.collect("c1", 2000), "OK");
 	assertTagged(await client.command('RENAME "Caf&AOk-!" "Caf&AOk- 2"'), "OK");
 	assertTagged(await client.command('SUBSCRIBE "Caf&AOk- 2"'), "OK");
-	assertTagged(await client.command('UNSUBSCRIBE "Caf&AOk- 2"'), "NO", /\[CANNOT\]/);
+	assertTagged(await client.command('UNSUBSCRIBE "Caf&AOk- 2"'), "OK", undefined, "stored since A5.5b");
 	assertTagged(await client.command("DELETE Work"), "OK");
 	assertTagged(await client.command('CREATE "work"'), "OK", undefined, "the deleted name is free again");
 	assert.deepEqual(folderNames(context), ["Café 2", "work"]);

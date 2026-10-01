@@ -110,7 +110,7 @@ export default {
 				await restoreDatabaseRecords(env.DB, document.buffer.slice(document.byteOffset, document.byteOffset + document.byteLength));
 				return Response.json(true);
 			}
-			return Response.json(await imap[op](env, ...args));
+			return Response.json((await imap[op](env, ...args)) ?? null);
 		} catch (error) {
 			return Response.json({ error: String(error?.cause?.message ?? error?.message ?? error), code: error?.code ?? null }, { status: 500 });
 		}
@@ -170,8 +170,8 @@ try {
 	console.log("Migrations (Workers runner on D1)");
 	const migrated = await op("migrate");
 	const migrationFiles = readdirSync(join(root, "drizzle", "migrations")).filter((name) => name.endsWith(".sql"));
-	check("every migration applies, bp0004 last", migrated.ready && migrated.applied.length === migrationFiles.length && migrated.applied.at(-1) === "bp0004_release_imap_draft_uid_on_content_change.sql", migrated);
-	check(`${migrationFiles.length} migrations: ${migrationFiles.filter((name) => /^\d/.test(name)).length} upstream + ${migrationFiles.filter((name) => name.startsWith("bp")).length} Blue Pine`, migrationFiles.length === 52 && migrationFiles.filter((name) => name.startsWith("bp")).length === 4);
+	check("every migration applies, bp0005 last", migrated.ready && migrated.applied.length === migrationFiles.length && migrated.applied.at(-1) === "bp0005_add_imap_subscriptions.sql", migrated);
+	check(`${migrationFiles.length} migrations: ${migrationFiles.filter((name) => /^\d/.test(name)).length} upstream + ${migrationFiles.filter((name) => name.startsWith("bp")).length} Blue Pine`, migrationFiles.length === 53 && migrationFiles.filter((name) => name.startsWith("bp")).length === 5);
 	const onMessages = (await sql(["SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'messages' AND name LIKE 'bp%' ORDER BY name"]))[0];
 	check("bp0003's and bp0004's triggers are the only Blue Pine triggers on messages", onMessages.length === 2 && onMessages[0].name === "bp_imap_draft_content_releases_uid" && onMessages[1].name === "bp_imap_membership_clears_deleted" && /AFTER UPDATE OF `mailbox_id`, `status`, `folder_id` ON `messages`/.test(onMessages[1].sql) && /`in_reply_to`, `references_header` ON `messages`/.test(onMessages[0].sql), onMessages);
 	const onAttachments = (await sql(["SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'message_attachments' AND name LIKE 'bp%' ORDER BY name"]))[0].map((row) => row.name);
@@ -725,11 +725,44 @@ try {
 	check("the upgrade installs the three certified triggers verbatim", same((await sql(["SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'bp_imap_draft_%' ORDER BY name"]))[0], draftTriggers));
 	check("a second run applies nothing", (await op("migrate")).applied.length === 0);
 
+	console.log("IMAP subscriptions (bp0005, A5.5b)");
+	// The delegate authenticates with a mail app password, so readerGuard's credential branch (json_each over its scopes) runs on D1.
+	const delegate = { userId: "user-b", mailboxId: "mbx-s", appPasswordId: "map-sub" };
+	const ownerShared = { userId: "user-a", mailboxId: "mbx-s" };
+	// Earlier sections revoked user-b's delegation and disabled user-b: a fresh read-only delegation and credential for these checks.
+	await sql(
+		["UPDATE users SET disabled = 0 WHERE id = 'user-b'"],
+		["INSERT INTO mailbox_access (id, mailbox_id, user_id, permission, created_at) VALUES ('acc-sub', 'mbx-s', 'user-b', 'read_only', 1)"],
+		["INSERT INTO mail_app_passwords (id, user_id, mailbox_id, label, public_id, secret_hash, scopes, created_at) VALUES ('map-sub', 'user-b', 'mbx-s', 'd1', 'pub-sub', 'h', ?, 1)", JSON.stringify(["imap"])],
+	);
+	check("nothing is unsubscribed before anyone unsubscribes", same(await op("listImapUnsubscribed", owner), []));
+	await op("setImapSubscription", owner, "archive", false);
+	await op("setImapSubscription", owner, "archive", false);
+	check("UNSUBSCRIBE is stored once, however often it is repeated", same(await op("listImapUnsubscribed", owner), ["archive"]));
+	await op("setImapSubscription", delegate, "junk", false);
+	check("a read-only delegate keeps its own state for the shared mailbox", same(await op("listImapUnsubscribed", delegate), ["junk"]) && same(await op("listImapUnsubscribed", ownerShared), []));
+	check("a folder of another mailbox is nonexistent", (await op("setImapSubscription", delegate, "f:no-such-folder", false))?.code === "nonexistent");
+	await sql(["UPDATE users SET disabled = 1 WHERE id = 'user-b'"]);
+	const refused = await op("setImapSubscription", delegate, "trash", false);
+	await sql(["UPDATE users SET disabled = 0 WHERE id = 'user-b'"]);
+	check("a disabled user records nothing (forbidden)", refused?.code === "forbidden" && same(await op("listImapUnsubscribed", delegate), ["junk"]), refused);
+	const subscriptionRows = (await sql(["SELECT COUNT(*) AS n FROM imap_unsubscribed_folders"]))[0][0].n;
+	check("the readerGuard statement, with its credential and json_each scope check, records state on D1", subscriptionRows === 2, subscriptionRows);
+	await sql(["UPDATE mail_app_passwords SET scopes = ? WHERE id = 'map-sub'", JSON.stringify(["smtp"])]);
+	const noScope = await op("setImapSubscription", delegate, "archive", false);
+	await sql(["UPDATE mail_app_passwords SET scopes = ? WHERE id = 'map-sub'", JSON.stringify(["imap"])]);
+	check("a credential without the imap scope records nothing (forbidden)", noScope?.code === "forbidden" && same(await op("listImapUnsubscribed", delegate), ["junk"]), noScope);
+	await op("setImapSubscription", owner, "archive", true);
+	await op("setImapSubscription", owner, "archive", true);
+	check("SUBSCRIBE removes the row and is idempotent", same(await op("listImapUnsubscribed", owner), []));
+	await op("setImapSubscription", owner, "trash", false);
+
 	console.log("Backup round trip and restart");
 	const beforeBackup = await op("openImapFolder", owner, "inbox");
 	check("backup export + restore on D1", (await op("roundTrip")) === true);
 	const restored = await op("openImapFolder", owner, "inbox");
 	check("UIDVALIDITY, UIDNEXT and UIDs preserved", restored.uidValidity === beforeBackup.uidValidity && restored.uidNext === beforeBackup.uidNext && same(restored.messages, beforeBackup.messages));
+	check("subscription state survives a backup restore", same(await op("listImapUnsubscribed", owner), ["trash"]) && same(await op("listImapUnsubscribed", delegate), ["junk"]));
 	check("the bp0003 and bp0004 triggers survive a backup restore", (await sql(["SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name IN ('bp_imap_membership_clears_deleted', 'bp_imap_draft_content_releases_uid', 'bp_imap_draft_attachment_added_releases_uid', 'bp_imap_draft_attachment_removed_releases_uid')"]))[0][0].n === 4);
 	await mf.dispose();
 	mf = start();
