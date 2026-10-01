@@ -3,8 +3,14 @@ import { getDb } from "@/db";
 import type { AppDatabase } from "@/db";
 import { folders, jmapMailboxRevisions, messages } from "@/db/schema";
 import { imapMessageUids } from "@/db/schema/bluepine";
+import { sanitizeFilename, validateAttachments } from "@/lib/email/attachments";
 import { resolveCanonicalMessage } from "@/lib/email/canonical-message";
-import { fingerprintFromKey, isCanonicalKey } from "@/lib/email/canonical-message-utils";
+import type { CanonicalRow } from "@/lib/email/canonical-message-types";
+import { draftFingerprint, fingerprintFromKey, isCanonicalKey } from "@/lib/email/canonical-message-utils";
+import { buildSnippet, parseRawMime } from "@/lib/email/parse";
+import { getAuthorizedSenderAddress } from "@/lib/email/sender";
+import { resolveThreadId } from "@/lib/email/threading";
+import { newId } from "@/lib/ids";
 import { isMailboxSharingEnabled } from "@/lib/mailboxes/access-utils";
 import { authorizeImapAccess } from "./access";
 import { cleanupDeletedMessageObjects } from "./cleanup";
@@ -17,16 +23,19 @@ import {
 	findFolderRow,
 	hasDeletedInvariant,
 	hasDraftInvariant,
+	insertImapDraft,
 	membershipCondition,
 	relocateImapMessages,
 	releaseStaleDraftUids,
 	releaseUid,
 	syncFolder,
 } from "./state";
-import type { ImapFolderRow } from "./state";
+import type { ImapDraftAttachmentRow, ImapDraftRow, ImapFolderRow } from "./state";
 import type {
 	ImapAccess,
+	ImapAppendResult,
 	ImapChangeSignal,
+	ImapDraftAppend,
 	ImapFlagChanges,
 	ImapFlagName,
 	ImapFlags,
@@ -753,4 +762,137 @@ export async function trainImapSpamFeedback(env: CloudflareEnv, principal: ImapP
 		}
 	}
 	return failed;
+}
+
+/**
+ * Create a draft from the octets of an IMAP APPEND (A5.7). Drafts only, for principals with
+ * management access (the owner, or a full_access delegate while sharing is enabled): the
+ * principals who can also mark and expunge their earlier versions, which is how clients
+ * replace a draft.
+ *
+ * The octets are kept exactly as received, under `drafts/<messageId>.eml` like JMAP
+ * Email/import's, so FETCH serves them byte for byte and RFC822.SIZE is their length. The
+ * columns the web app and JMAP read are parsed from them the way Email/import parses its
+ * upload, with the same rules: a From header the principal may send from (the existing sender
+ * check) and the existing attachment limits. Attachments are stored like every draft's, under
+ * server-generated ids.
+ *
+ * Order: every object first (raw, then attachments), then one guarded batch for the relational
+ * state (insertImapDraft), so the draft never exists without its bytes or without its UID. If
+ * a write or the batch fails, or authority is gone by then, nothing is committed and every
+ * object written is deleted, best effort (an object left by a crash is unreferenced and never
+ * served). A retry after a lost tagged answer creates another draft, as in any IMAP server.
+ */
+export async function appendImapDraft(env: CloudflareEnv, principal: ImapPrincipal, input: ImapDraftAppend): Promise<ImapAppendResult> {
+	const db = getDb(env);
+	const access = await authorizeImapAccess(db, principal);
+	if (!access) throw new ImapStateError("forbidden", "Mailbox access denied");
+	if (!access.canManage) throw new ImapStateError("denied", "This access does not allow creating drafts");
+	const { bytes } = input;
+
+	let parsed: Awaited<ReturnType<typeof parseRawMime>>;
+	try {
+		// The receive buffer is exactly the message, so the parser reads it without a copy.
+		const raw = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? (bytes.buffer as ArrayBuffer) : (bytes.slice().buffer as ArrayBuffer);
+		parsed = await parseRawMime(raw);
+	} catch {
+		throw new ImapStateError("unsupported", "The message could not be parsed");
+	}
+	if (!parsed.fromAddr) throw new ImapStateError("unsupported", "The message has no From header");
+	let sender: { fromAddr: string; mailboxId: string };
+	try {
+		sender = await getAuthorizedSenderAddress(env, { userId: access.userId, from: parsed.fromAddr, mailboxId: access.mailboxId });
+	} catch {
+		// Lost access is reported as such; anything else is about the From address.
+		if (!(await authorizeImapAccess(db, principal))) throw new ImapStateError("forbidden", "Mailbox access denied");
+		throw new ImapStateError("unsupported", "The From address cannot be used from this mailbox");
+	}
+	try {
+		validateAttachments(parsed.attachments);
+	} catch (error) {
+		throw new ImapStateError("limit", error instanceof Error ? error.message : "Attachments exceed the limits");
+	}
+
+	const id = newId("msg");
+	const rawR2Key = `drafts/${id}.eml`;
+	const attachments = parsed.attachments.map((attachment) => {
+		const attachmentId = newId("att");
+		const filename = sanitizeFilename(attachment.filename);
+		const row: ImapDraftAttachmentRow = {
+			id: attachmentId,
+			filename,
+			contentType: attachment.type,
+			size: attachment.content.byteLength,
+			disposition: attachment.disposition ?? "attachment",
+			contentId: attachment.contentId ?? null,
+			r2Key: `attachments/${id}/${attachmentId}/${filename}`,
+		};
+		return { row, content: attachment.content };
+	});
+	const draft: ImapDraftRow = {
+		id,
+		userId: access.userId,
+		mailboxId: access.mailboxId,
+		fromAddr: sender.fromAddr,
+		toAddr: parsed.toAddr ?? "",
+		ccAddr: parsed.ccAddr,
+		bccAddr: parsed.bccAddr,
+		subject: parsed.subject,
+		snippet: buildSnippet(parsed.text, parsed.html),
+		textBody: parsed.text,
+		htmlBody: parsed.html,
+		inReplyTo: parsed.inReplyTo,
+		references: parsed.references.length ? parsed.references.join(" ") : null,
+		threadId: await resolveThreadId(db, { mailboxId: access.mailboxId, messageId: parsed.messageId, inReplyTo: parsed.inReplyTo, references: parsed.references }),
+		// Angle brackets are kept, as inbound rows and Email/import store them.
+		providerMessageId: parsed.messageId,
+		rawR2Key,
+		starred: input.flagged,
+		createdAt: Math.floor((input.internalDate ?? new Date()).getTime() / 1000),
+	};
+	// The fingerprint A3 binds a Drafts UID to, over exactly what the batch stores.
+	const fingerprint = await draftFingerprint(draft as unknown as CanonicalRow, attachments.map((attachment) => attachment.row));
+
+	const written: string[] = [];
+	const removeWritten = async () => {
+		for (const key of written) {
+			try {
+				await env.BUCKET.delete(key);
+			} catch (error) {
+				console.warn(`IMAP APPEND could not remove ${key} of uncommitted draft ${id}`, error instanceof Error ? error.message : error);
+			}
+		}
+	};
+	try {
+		// Named before writing, so a write that fails halfway is removed too.
+		written.push(rawR2Key);
+		await env.BUCKET.put(rawR2Key, bytes, { httpMetadata: { contentType: "message/rfc822" }, customMetadata: { userId: access.userId, messageId: id } });
+		for (const attachment of attachments) {
+			written.push(attachment.row.r2Key);
+			await env.BUCKET.put(attachment.row.r2Key, attachment.content, { httpMetadata: { contentType: attachment.row.contentType }, customMetadata: { filename: attachment.row.filename, messageId: id } });
+		}
+	} catch (error) {
+		await removeWritten();
+		throw new ImapStateError("unavailable", `Draft objects could not be stored: ${error instanceof Error ? error.message : String(error)}`);
+	}
+
+	let committed: { uid: number; uidValidity: number } | null;
+	try {
+		committed = await insertImapDraft(
+			db,
+			{ userId: access.userId, mailboxId: access.mailboxId, appPasswordId: principal.appPasswordId, sharedAccess: isMailboxSharingEnabled() },
+			draft,
+			attachments.map((attachment) => attachment.row),
+			{ size: bytes.byteLength, fingerprint },
+		);
+	} catch (error) {
+		await removeWritten();
+		throw error;
+	}
+	if (!committed) {
+		await removeWritten();
+		if (!(await authorizeImapAccess(db, principal))) throw new ImapStateError("forbidden", "Mailbox access denied");
+		throw new ImapStateError("denied", "This access does not allow creating drafts");
+	}
+	return { messageId: id, ...committed };
 }

@@ -227,14 +227,21 @@ test("the IMAP state layer, flag writes included, stays Workers/D1-safe", () => 
 		assert.deepEqual(callers, [join("src", "lib", "imap-server", "session.ts")], writer);
 	}
 	// UIDPLUS (A5.3): COPYUID is sent in exactly one place, MOVE, from the mapping the relocation
-	// batch read back (copyUidData); APPEND and COPY, which would owe APPENDUID and COPYUID, are
-	// still refused before any storage call.
+	// batch read back (copyUidData); COPY, which would owe COPYUID, is still refused before any
+	// storage call. APPEND (A5.7) sends APPENDUID in exactly one place, from what appendImapDraft's
+	// commit read back, and only the listener creates drafts through it.
 	const session = read(join("src", "lib", "imap-server", "session.ts"));
 	assert.equal(session.match(/`\* OK \[COPYUID \$\{/g)?.length, 1);
 	assert.match(session, /const copyUid = copyUidData\(result\.moved\);/);
-	assert.doesNotMatch(session, /\[APPENDUID/);
+	assert.equal(session.match(/\[APPENDUID/g)?.length, 1);
+	assert.match(session, /OK \[APPENDUID \$\{result\.uidValidity\} \$\{result\.uid\}\] APPEND completed/);
+	const appendCallers = [...sourceFiles("src"), "worker.ts", "worker-utils.ts"].filter((file) => /\bappendImapDraft\(/.test(read(file)) && dirname(file) !== join("src", "lib", "imap"));
+	assert.deepEqual(appendCallers, [join("src", "lib", "imap-server", "session.ts")], "appendImapDraft");
 	assert.match(session.match(/export const AUTH_CAPABILITIES = "([^"]*)"/)[1], /(^| )UIDPLUS( |$)/);
-	assert.match(session, /const UNSUPPORTED_COMMANDS = new Set\(\["COPY", "APPEND"\]\);/);
+	assert.doesNotMatch(session.match(/export const AUTH_CAPABILITIES = "([^"]*)"/)[1], /LITERAL|MULTIAPPEND|APPENDLIMIT|CATENATE|BINARY/);
+	assert.match(session, /const UNSUPPORTED_COMMANDS = new Set\(\["COPY"\]\);/);
+	// The APPEND size limit is JMAP's maxSizeUpload itself, so the two cannot diverge.
+	assert.match(read(join("src", "lib", "imap-server", "append.ts")), /export const MAX_APPEND_SIZE = LIMITS\.maxSizeUpload;/);
 	// Mailbox management (A5.5a) goes through the R-1 service only; the engine never writes folders itself.
 	assert.doesNotMatch(session, /insert\(folders\)|update\(folders\)|delete\(folders\)|FROM folders|INTO folders/);
 	assert.match(session, /createFolder\(db, actor, mailboxId, name, \{ strictNames: true \}\)/);

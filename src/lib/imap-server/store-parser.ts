@@ -21,8 +21,11 @@ const STORED: Record<string, ImapFlagName> = { SEEN: "seen", FLAGGED: "flagged",
 /** System flags a client may name but this server does not keep (\Draft is derived from the Drafts folder). */
 const NOT_STORED = new Set(["ANSWERED", "DRAFT"]);
 
-/** flag = "\" atom (a system flag or flag-extension) / atom (a keyword). */
-function readFlag(reader: CommandReader, request: StoreRequest): void {
+/**
+ * flag = "\" atom (a system flag or flag-extension) / atom (a keyword). Shared with APPEND
+ * (A5.7), whose flag list follows the same rules.
+ */
+export function readFlag(reader: CommandReader, request: Pick<StoreRequest, "flags" | "ignored">): void {
 	if (reader.maybe("\\")) {
 		const name = reader.atom().toUpperCase();
 		if (name === "RECENT") throw new ImapSyntaxError("\\Recent cannot be changed");

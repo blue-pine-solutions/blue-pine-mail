@@ -26,6 +26,9 @@ export async function loadApp(name) {
 				export * as names from "./src/lib/imap-server/mailbox-names.ts";
 				export { MessageView } from "./src/lib/imap-server/fetch.ts";
 				export * as search from "./src/lib/imap-server/search.ts";
+				export * as append from "./src/lib/imap-server/append.ts";
+				export { CommandFramer } from "./src/lib/imap-server/framer.ts";
+				export { LIMITS as JMAP_LIMITS } from "./src/lib/jmap/constants.ts";
 				export * as sequenceSet from "./src/lib/imap-server/sequence-set.ts";
 				export { ResponseBuilder } from "./src/lib/imap-server/response.ts";
 				export { startImapListener, readImapConfig, loadTlsMaterial, DEFAULT_IMAP_LIMITS } from "./server/runtime/imap.ts";
@@ -48,6 +51,7 @@ export async function loadApp(name) {
 				export { encodeMailboxRef } from "./src/lib/jmap/ids.ts";
 				export * as spamFeedback from "./src/lib/spam/feedback.ts";
 				export { PATCH as draftPatchRoute, DELETE as draftDeleteRoute } from "./src/app/api/drafts/[id]/route.ts";
+				export { GET as draftsListRoute } from "./src/app/api/drafts/route.ts";
 				export { storeMessageAttachments, deleteMessageAttachment } from "./src/lib/email/attachments.ts";
 				export { cleanupDeletedMessageObjects } from "./src/lib/imap/cleanup.ts";
 				export * as imapState from "./src/lib/imap/state.ts";
@@ -266,6 +270,7 @@ export function memoryClient(app, env, hostOverrides = {}, sessionOptions = {}) 
 		afterAuthenticate() {},
 		claimUserSlot: () => true,
 		acquireRead: async () => () => {},
+		acquireAppend: async () => () => {},
 		onAuthenticated() {},
 		...hostOverrides,
 	};

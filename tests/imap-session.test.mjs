@@ -342,7 +342,7 @@ test("gate3: a UIDVALIDITY change or a vanished selected folder ends the session
 	assert.equal(gone.untagged.at(-1).text, "* BYE Selected mailbox no longer exists");
 });
 
-test("gate3: COPY and APPEND, the mutating commands not yet implemented, are refused without touching A3 or product state", async (t) => {
+test("gate3: COPY, not yet implemented, and APPEND outside Drafts are refused without touching A3 or product state", async (t) => {
 	const context = await loggedIn(t);
 	await context.deliver("m-1", "Subject: x\r\n\r\nx\r\n");
 	await context.client.command("SELECT INBOX");
@@ -358,12 +358,11 @@ test("gate3: COPY and APPEND, the mutating commands not yet implemented, are ref
 	for (const command of ["COPY 1 Trash", "UID COPY 1 Trash"]) {
 		assertTagged(await context.client.command(command), "NO", /\[CANNOT\] .* not available on this server/);
 	}
+	// APPEND (A5.7, certified in imap-append.test.mjs) is Drafts only: refused before the continuation.
 	context.client.write("ap APPEND INBOX (\\Seen) {12}\r\n");
-	assert.match((await context.client.unit()).text, /^\+ /);
-	context.client.write("Subject: x\r\n\r\n");
-	assertTagged(await context.client.collect("ap"), "NO", /CANNOT/);
+	assertTagged(await context.client.collect("ap"), "NO", /\[CANNOT\] APPEND is only available for Drafts/);
 	context.client.write("big APPEND INBOX {70000}\r\n");
-	assertTagged(await context.client.collect("big"), "BAD", /Literal too large/);
+	assertTagged(await context.client.collect("big"), "NO", /\[CANNOT\] APPEND is only available for Drafts/);
 	// IDLE (A5.4) is certified in imap-idle.test.mjs.
 	for (const command of ["ENABLE CONDSTORE", "COMPRESS DEFLATE", "GETQUOTAROOT INBOX", "XLIST \"\" *"]) {
 		assertTagged(await context.client.command(command), "BAD", /Unknown command/);

@@ -3,6 +3,7 @@ import { X509Certificate } from "node:crypto";
 import type { AddressInfo, Socket } from "node:net";
 import { createSecureContext, createServer, type TLSSocket } from "node:tls";
 import { DISTRIBUTION } from "@/lib/distribution/identity";
+import { DEFAULT_APPEND_TIMING } from "@/lib/imap-server/append";
 import { DEFAULT_IDLE_TIMING, ImapSession } from "@/lib/imap-server/session";
 import type { ImapLogEvent, ImapSessionHost } from "@/lib/imap-server/types";
 import { clientAddressKey, ConcurrencyCounter, ContentReadLimiter, SlidingWindowCounter } from "./imap-limits";
@@ -44,6 +45,15 @@ export type ImapLimits = {
 	/** Message-content permits (FETCH of content, content SEARCH), held until the response is written: in all, and per user (A5.6). */
 	maxConcurrentReads: number;
 	maxConcurrentReadsPerUser: number;
+	/**
+	 * APPEND uploads (A5.7), in all and per user: a permit is taken before the continuation and
+	 * held through receipt, parsing, storage and commit. Separate from the content-read permits.
+	 */
+	maxConcurrentAppends: number;
+	maxConcurrentAppendsPerUser: number;
+	/** An accepted APPEND literal must arrive within this base plus its size at this minimum average rate (absolute). */
+	appendLiteralBaseMs: number;
+	appendLiteralMinBytesPerSecond: number;
 	shutdownGraceMs: number;
 	/** IDLE (A5.4): change-signal poll, its ±jitter, unconditional reconciliation, keepalive, fail-closed cutoffs. */
 	idlePollMs: number;
@@ -70,6 +80,10 @@ export const DEFAULT_IMAP_LIMITS: ImapLimits = {
 	accessCheckIntervalMs: 60_000,
 	maxConcurrentReads: 8,
 	maxConcurrentReadsPerUser: 2,
+	maxConcurrentAppends: 4,
+	maxConcurrentAppendsPerUser: 1,
+	appendLiteralBaseMs: DEFAULT_APPEND_TIMING.literalBaseMs,
+	appendLiteralMinBytesPerSecond: DEFAULT_APPEND_TIMING.literalMinBytesPerSecond,
 	shutdownGraceMs: 2_000,
 	idlePollMs: DEFAULT_IDLE_TIMING.pollMs,
 	idlePollJitter: DEFAULT_IDLE_TIMING.pollJitter,
@@ -151,6 +165,7 @@ export async function startImapListener(
 	const addressFailures = new SlidingWindowCounter(limits.authFailuresPerAddress, limits.authFailureWindowMs);
 	const usernameFailures = new SlidingWindowCounter(limits.authFailuresPerUsername, limits.authFailureWindowMs);
 	const reads = new ContentReadLimiter(limits.maxConcurrentReads, limits.maxConcurrentReadsPerUser);
+	const appends = new ContentReadLimiter(limits.maxConcurrentAppends, limits.maxConcurrentAppendsPerUser);
 	const sessions = new Map<TLSSocket, ImapSession>();
 	const sockets = new Set<Socket>();
 	const handshakes = new Map<string, ReturnType<typeof setTimeout>>();
@@ -262,6 +277,7 @@ export async function startImapListener(
 				return true;
 			},
 			acquireRead: (userId) => reads.acquire(userId),
+			acquireAppend: (userId) => appends.acquire(userId),
 			onAuthenticated() {},
 		};
 
@@ -276,7 +292,13 @@ export async function startImapListener(
 				unavailableMs: limits.idleUnavailableMs,
 			},
 			// The login deadline and autologout run in the session, on this host's delay and clock.
-			timeouts: { loginMs: limits.loginTimeoutMs, unauthenticatedIdleMs: limits.unauthenticatedIdleMs, authenticatedIdleMs: limits.authenticatedIdleMs },
+			timeouts: {
+				loginMs: limits.loginTimeoutMs,
+				unauthenticatedIdleMs: limits.unauthenticatedIdleMs,
+				authenticatedIdleMs: limits.authenticatedIdleMs,
+				appendLiteralBaseMs: limits.appendLiteralBaseMs,
+				appendLiteralMinBytesPerSecond: limits.appendLiteralMinBytesPerSecond,
+			},
 		});
 		sessions.set(socket, session);
 		socket.setNoDelay(true);

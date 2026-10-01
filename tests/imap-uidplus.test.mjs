@@ -12,7 +12,8 @@ import { assertTagged, install, loadApp, memoryClient } from "./support/imap-har
  * - MOVE and UID MOVE report `* OK [COPYUID …]` before their EXPUNGEs, from the destination UIDs
  *   and UIDVALIDITY the committing relocation batch read back; never for a move that did not
  *   commit.
- * - UIDPLUS is advertised after authentication; COPY, APPEND and folder management stay refused.
+ * - UIDPLUS is advertised after authentication; COPY stays refused. APPEND (A5.7, Drafts only)
+ *   reports APPENDUID only for a committed draft; it is certified in imap-append.test.mjs.
  */
 const { app, cleanup } = await loadApp("imap-uidplus");
 test.after(cleanup);
@@ -184,11 +185,12 @@ test("a5.3: UIDPLUS is advertised after authentication only; UID EXPUNGE needs a
 	for (const command of ["COPY 1 Trash", "UID COPY 1 Trash"]) {
 		assertTagged(await client.command(command), "NO", /\[CANNOT\] .* not available on this server/, command);
 	}
+	// An APPEND that commits nothing (here a message without From) carries no APPENDUID.
 	client.write("ap APPEND Drafts (\\Seen) {12}\r\n");
 	assert.match((await client.unit()).text, /^\+ /);
 	client.write("Subject: x\r\n\r\n");
 	const append = await client.collect("ap");
-	assertTagged(append, "NO", /CANNOT/);
+	assertTagged(append, "NO", /\[CANNOT\] The message has no From header/);
 	assert.ok(!append.tagged.includes("APPENDUID"));
 	for (const command of ["ENABLE CONDSTORE", "ENABLE QRESYNC"]) assertTagged(await client.command(command), "BAD", /Unknown command/, command);
 	assertTagged(await client.command("FETCH 1 (MODSEQ)"), "BAD");

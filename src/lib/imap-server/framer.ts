@@ -13,6 +13,14 @@ const LF = 0x0a;
  * Non-synchronizing literals (`{n+}`, LITERAL+) are not supported and not advertised; a
  * client that sends one anyway is disconnected, since its octets would follow unannounced
  * and could not be told apart from commands.
+ *
+ * APPEND's message literal (A5.7, when `appendLiterals` is on) is not an ordinary literal and
+ * is never subject to the ordinary limits: the framer hands the session an `append` item with
+ * the command so far and the announced size, and holds (no continuation, no further framing,
+ * nothing consumed) until the session accepts the literal into a buffer of exactly that size
+ * (acceptAppend) or refuses it (refuseAppend). Accepted octets go straight into that buffer;
+ * the rest of the command line then comes back raw as `append-end`, and framing resumes at the
+ * exact next octet. An APPEND's mailbox name may still be an ordinary literal.
  */
 export class CommandFramer {
 	/** Unconsumed input is `storage[start, end)`; `scanned` octets of it hold no LF. */
@@ -27,6 +35,13 @@ export class CommandFramer {
 	private literalCount = 0;
 	private continuationPending = false;
 	private failed = false;
+	/** An `append` item was returned and the session has not decided yet. */
+	private held = false;
+	/** The accepted APPEND literal's buffer, and how much of it is filled. */
+	private sink: Uint8Array | null = null;
+	private sinkFilled = 0;
+	/** The APPEND literal is complete; the next line is the rest of its command line. */
+	private trailerPending = false;
 
 	constructor(
 		private readonly limits: () => FramerLimits,
@@ -45,12 +60,59 @@ export class CommandFramer {
 
 	/** Whether a command is partly framed (awaiting the rest of a line or a literal's octets). */
 	get midCommand(): boolean {
-		return this.parts.length > 0 || this.literalRemaining >= 0;
+		return this.parts.length > 0 || this.literalRemaining >= 0 || this.held || this.sink !== null || this.trailerPending;
 	}
 
-	/** Take received octets. Nothing is interpreted until next() is called. */
+	/** Whether an `append` item awaits the session's decision; nothing is framed meanwhile. */
+	get holding(): boolean {
+		return this.held;
+	}
+
+	/**
+	 * Receive the held APPEND's literal into `buffer`, whose length is the announced size. Its
+	 * octets are copied there and nowhere else; then the rest of the line becomes `append-end`.
+	 */
+	acceptAppend(buffer: Uint8Array): void {
+		if (!this.held) throw new Error("No APPEND literal is waiting");
+		this.held = false;
+		this.sink = buffer;
+		this.sinkFilled = 0;
+		this.completeSink();
+	}
+
+	/** Refuse the held APPEND's literal. The client has not been sent a continuation, so it sends no octets for it. */
+	refuseAppend(): void {
+		if (!this.held) throw new Error("No APPEND literal is waiting");
+		this.held = false;
+	}
+
+	/** Take received octets. Nothing is interpreted until next() is called, except octets of an accepted APPEND literal. */
 	feed(chunk: Uint8Array): void {
-		if (!this.failed && chunk.length) this.append(chunk);
+		if (this.failed || !chunk.length) return;
+		if (this.sink && this.start === this.end) {
+			// Nothing is buffered ahead of them, so they go straight into the literal's buffer.
+			const take = this.fillSink(chunk);
+			if (take < chunk.length) this.append(chunk.subarray(take));
+			return;
+		}
+		this.append(chunk);
+	}
+
+	/** Copy as much of `octets` as the APPEND literal still needs; returns how many were taken. */
+	private fillSink(octets: Uint8Array): number {
+		const sink = this.sink!;
+		const take = Math.min(sink.length - this.sinkFilled, octets.length);
+		sink.set(octets.subarray(0, take), this.sinkFilled);
+		this.sinkFilled += take;
+		this.completeSink();
+		return take;
+	}
+
+	private completeSink(): void {
+		if (this.sink && this.sinkFilled === this.sink.length) {
+			this.sink = null;
+			this.trailerPending = true;
+		}
 	}
 
 	/** Octets received but not yet framed. */
@@ -65,6 +127,11 @@ export class CommandFramer {
 	 */
 	next(): FramedItem | null {
 		while (!this.failed && this.end > this.start) {
+			if (this.held) break;
+			if (this.sink) {
+				this.start += this.fillSink(this.storage.subarray(this.start, this.end));
+				continue;
+			}
 			if (this.literalRemaining >= 0) {
 				const take = Math.min(this.literalRemaining, this.end - this.start);
 				this.literalChunks.push(this.storage.slice(this.start, this.start + take));
@@ -91,6 +158,11 @@ export class CommandFramer {
 			const line = bytesToBinary(this.storage, this.start, lineEnd);
 			this.start = newline + 1;
 			this.scanned = 0;
+			if (this.trailerPending) {
+				// Raw: a `{n}` here would be a second message (MULTIAPPEND), which is not supported.
+				this.trailerPending = false;
+				return { kind: "append-end", trailing: line };
+			}
 			if (this.continuationPending && this.parts.length === 0) {
 				this.continuationPending = false;
 				return { kind: "continuation", line };
@@ -138,6 +210,12 @@ export class CommandFramer {
 		if (marker[2] === "+") return this.fail("Non-synchronizing literals are not supported");
 		const size = Number(marker[1]);
 		this.parts.push({ kind: "text", text: line.slice(0, marker.index) });
+		if (limits.appendLiterals && this.isAppendMessageLiteral()) {
+			const parts = this.parts;
+			this.reset();
+			this.held = true;
+			return { kind: "append", parts, size };
+		}
 		if (this.literalCount + 1 > limits.maxLiterals || this.literalTotal + size > limits.maxLiteral) {
 			// The client waits for our continuation before sending the octets, so refusing
 			// the command here leaves the stream in sync.
@@ -150,6 +228,18 @@ export class CommandFramer {
 		this.literalRemaining = size;
 		this.onContinuation();
 		return null;
+	}
+
+	/**
+	 * Whether the literal just announced is an APPEND's message: the command is APPEND and its
+	 * mailbox name is already there (an earlier literal, or text after the command name).
+	 * Otherwise it is the mailbox name itself, an ordinary literal.
+	 */
+	private isAppendMessageLiteral(): boolean {
+		const first = this.parts[0];
+		if (first?.kind !== "text") return false;
+		const command = /^[^ ]+ APPEND (.*)$/is.exec(first.text);
+		return !!command && (this.parts.length > 1 || command[1].trim() !== "");
 	}
 
 	private complete(): FramedItem {

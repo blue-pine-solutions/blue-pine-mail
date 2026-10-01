@@ -72,10 +72,11 @@ test("a5.5a: the commands need an authenticated session, add no capability, and 
 	}
 	assert.equal(state(context), before);
 	assertTagged(await client.command("COPY 1 Trash"), "BAD", /not valid in this state/, "COPY stays unimplemented (and needs a selection)");
+	// APPEND (A5.7) is Drafts only: INBOX is refused before the continuation, so no octets follow.
 	client.write("ap APPEND INBOX {1}\r\n");
-	await client.unit();
-	client.write("x\r\n");
-	assertTagged(await client.collect("ap"), "NO", /\[CANNOT\] APPEND is not available/);
+	const append = await client.collect("ap");
+	assert.deepEqual(append.untagged, [], "no continuation");
+	assertTagged(append, "NO", /\[CANNOT\] APPEND is only available for Drafts/);
 });
 
 // ---- CREATE -----------------------------------------------------------------------------------------

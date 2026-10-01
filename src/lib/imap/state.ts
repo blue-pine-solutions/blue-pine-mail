@@ -445,3 +445,98 @@ export async function deleteImapMessagesPermanently(
 			.map((row) => ({ uid: row.uid, messageId: row.messageId, rawKey: deletedIds.get(row.messageId) ?? null, attachmentKeys: attachmentKeys.get(row.messageId) ?? [] })),
 	};
 }
+
+/** A draft IMAP APPEND creates (A5.7), as its `messages` row will hold it. `createdAt` is in seconds (INTERNALDATE). */
+export type ImapDraftRow = {
+	id: string;
+	userId: string;
+	mailboxId: string;
+	fromAddr: string;
+	toAddr: string;
+	ccAddr: string | null;
+	bccAddr: string | null;
+	subject: string | null;
+	snippet: string;
+	textBody: string | null;
+	htmlBody: string | null;
+	inReplyTo: string | null;
+	references: string | null;
+	threadId: string | null;
+	providerMessageId: string | null;
+	rawR2Key: string;
+	starred: boolean;
+	createdAt: number;
+};
+
+/** One attachment of such a draft; its object is already stored under `r2Key`. */
+export type ImapDraftAttachmentRow = {
+	id: string;
+	filename: string;
+	contentType: string;
+	size: number;
+	disposition: "attachment" | "inline";
+	contentId: string | null;
+	r2Key: string;
+};
+
+/**
+ * Commit a draft created by IMAP APPEND (A5.7) as one batch (a transaction on D1 and on the
+ * Node SQLite wrapper), after its raw object and attachment objects were stored:
+ *
+ * 1. the Drafts folder's state row, created if this is its first use (as ensureFolderRow);
+ * 2. the `messages` row, inserted only while `authority` still holds (authorityGuard: the
+ *    user enabled, the credential present, the mailbox enabled and owned, or delegated with
+ *    full_access while sharing is enabled), so access lost during a long upload writes nothing;
+ * 3. its attachment rows, before any UID exists: bp0004's attachment trigger deletes a draft's
+ *    Drafts UID whenever one is added;
+ * 4. its Drafts UID from UIDNEXT (advanced by bp0002's trigger in the same statement), bound to
+ *    the raw object, its exact size and the draft's fingerprint, so a later sync keeps it;
+ * 5. that UID and the folder's UIDVALIDITY, read back inside the transaction (APPENDUID).
+ *
+ * Steps 3 and 4 do nothing unless step 2 inserted the row. Returns null when it did not
+ * (authority gone); a failing statement rolls back the whole batch, UIDNEXT included.
+ */
+export async function insertImapDraft(
+	db: AppDatabase,
+	authority: ImapDeletionAuthority,
+	draft: ImapDraftRow,
+	attachments: ImapDraftAttachmentRow[],
+	binding: { size: number; fingerprint: string },
+): Promise<{ uid: number; uidValidity: number } | null> {
+	const now = nowSeconds();
+	const { id, mailboxId } = draft;
+	const inserted = sql`EXISTS (SELECT 1 FROM messages WHERE messages.id = ${id})`;
+	const results = await batchSql(db, [
+		sql`
+			INSERT OR IGNORE INTO imap_folders (id, mailbox_id, folder_key, uid_validity, uid_next, created_at)
+			SELECT ${newId("imf")}, ${mailboxId}, 'drafts', MAX(${now}, COALESCE((SELECT MAX(uid_validity) FROM imap_folders WHERE mailbox_id = ${mailboxId}), 0) + 1), 1, ${now}
+		`,
+		sql`
+			INSERT INTO messages (id, user_id, mailbox_id, direction, from_addr, to_addr, cc_addr, bcc_addr, subject, snippet, text_body, html_body, raw_r2_key, status, read, starred, thread_id, in_reply_to, references_header, provider_message_id, created_at)
+			SELECT ${id}, ${draft.userId}, ${mailboxId}, 'outbound', ${draft.fromAddr}, ${draft.toAddr}, ${draft.ccAddr}, ${draft.bccAddr}, ${draft.subject}, ${draft.snippet}, ${draft.textBody}, ${draft.htmlBody}, ${draft.rawR2Key}, 'draft', 1, ${draft.starred ? 1 : 0}, ${draft.threadId}, ${draft.inReplyTo}, ${draft.references}, ${draft.providerMessageId}, ${draft.createdAt}
+			WHERE ${authorityGuard(authority)}
+		`,
+		...attachments.map(
+			(attachment) => sql`
+				INSERT INTO message_attachments (id, message_id, filename, content_type, size, disposition, content_id, r2_key, created_at)
+				SELECT ${attachment.id}, ${id}, ${attachment.filename}, ${attachment.contentType}, ${attachment.size}, ${attachment.disposition}, ${attachment.contentId}, ${attachment.r2Key}, ${now}
+				WHERE ${inserted}
+			`,
+		),
+		sql`
+			INSERT INTO imap_message_uids (imap_folder_id, uid, message_id, rfc822_key, rfc822_size, draft_fingerprint, created_at)
+			SELECT f.id, f.uid_next, ${id}, ${draft.rawR2Key}, ${binding.size}, ${binding.fingerprint}, ${now}
+			FROM imap_folders f
+			WHERE f.mailbox_id = ${mailboxId} AND f.folder_key = 'drafts'
+				AND EXISTS (SELECT 1 FROM messages WHERE messages.id = ${id} AND ${membershipCondition(mailboxId, "drafts")})
+		`,
+		sql`
+			SELECT u.uid AS uid, f.uid_validity AS uid_validity
+			FROM imap_message_uids u
+			JOIN imap_folders f ON f.id = u.imap_folder_id
+			WHERE u.message_id = ${id} AND f.mailbox_id = ${mailboxId} AND f.folder_key = 'drafts'
+		`,
+	]);
+	const [row] = (results.at(-1)!.results ?? []) as Array<{ uid: number; uid_validity: number }>;
+	return row ? { uid: Number(row.uid), uidValidity: Number(row.uid_validity) } : null;
+}

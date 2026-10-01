@@ -7,7 +7,15 @@ export type CommandPart = { kind: "text"; text: string } | { kind: "literal"; by
 export type FramedItem =
 	| { kind: "command"; parts: CommandPart[] }
 	| { kind: "continuation"; line: string }
-	| { kind: "error"; tag: string | null; message: string; fatal: boolean };
+	| { kind: "error"; tag: string | null; message: string; fatal: boolean }
+	/**
+	 * APPEND (A5.7): everything before the message literal, and its announced size. The framer
+	 * then holds (sends no `+`, frames nothing) until the session accepts the literal into a
+	 * buffer of exactly `size` octets or refuses it.
+	 */
+	| { kind: "append"; parts: CommandPart[]; size: number }
+	/** The accepted APPEND literal is complete; `trailing` is the rest of its command line (empty, unless the client sent more). */
+	| { kind: "append-end"; trailing: string };
 
 export type FramerLimits = {
 	/** Longest line (excluding literals), in octets. */
@@ -16,6 +24,8 @@ export type FramerLimits = {
 	maxLiteral: number;
 	/** Most literals in one command. */
 	maxLiterals: number;
+	/** Whether an APPEND's message literal is handed to the session (`append` items) instead of being framed as an ordinary literal. */
+	appendLiterals: boolean;
 };
 
 /** A range of message numbers (sequence numbers or UIDs); `null` stands for `*`. */
@@ -122,6 +132,12 @@ export type ImapSessionHost = {
 	 * to the release function, which may be called more than once.
 	 */
 	acquireRead(userId: string): Promise<() => void>;
+	/**
+	 * A permit for one APPEND upload (A5.7), taken before its continuation and held through
+	 * receipt, parsing, storage and commit: a global limit and a per-user one, separate from the
+	 * content-read permits. Resolves to the release function, which may be called more than once.
+	 */
+	acquireAppend(userId: string): Promise<() => void>;
 	/** The session has just authenticated (e.g. to switch idle timeouts). */
 	onAuthenticated(): void;
 };

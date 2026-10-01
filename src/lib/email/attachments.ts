@@ -35,7 +35,7 @@ export function normalizeAttachmentContent(
 	return new TextEncoder().encode(content).buffer;
 }
 
-function sanitizeFilename(filename: string): string {
+export function sanitizeFilename(filename: string): string {
 	const normalized = filename.trim().replace(/[/\\\0]/g, "_");
 	return normalized || "attachment";
 }

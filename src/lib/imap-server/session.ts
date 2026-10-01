@@ -1,10 +1,11 @@
 import { getDb } from "@/db";
 import { authorizeImapAccess } from "@/lib/imap/access";
-import { expungeImapFolder, fetchImapMessage, getImapChangeSignal, getImapFolderStatus, listImapMailboxes, moveImapMessages, openImapFolder, storeImapFlags, trainImapSpamFeedback } from "@/lib/imap/service";
+import { appendImapDraft, expungeImapFolder, fetchImapMessage, getImapChangeSignal, getImapFolderStatus, listImapMailboxes, moveImapMessages, openImapFolder, storeImapFlags, trainImapSpamFeedback } from "@/lib/imap/service";
 import type { ImapFlagName, ImapFlags, ImapFolderSnapshot, ImapMailbox, ImapMoveResult } from "@/lib/imap/types";
 import { ambiguousFolderIds, ImapStateError, imapFolderNameVerdict, STORABLE_FLAGS } from "@/lib/imap/utils";
 import { verifyMailAppPassword } from "@/lib/mail-app-passwords/verify";
 import { createFolder, deleteFolder, renameFolder } from "@/lib/mailboxes/folder-management";
+import { appendLiteralDeadlineMs, DEFAULT_APPEND_TIMING, MAX_APPEND_SIZE, readAppend } from "./append";
 import { binaryToUtf8 } from "./bytes-utils";
 import { formatFlags, MessageView, needsContent, writeFetchResponse } from "./fetch";
 import { readFetchItems } from "./fetch-parser";
@@ -48,8 +49,11 @@ import type { FetchItem, FramedItem, FramerLimits, ImapSessionHost, SelectedMail
  * - CREATE, RENAME and DELETE (A5.5a) through the R-1 folder-management service, with a strict
  *   IMAP naming policy and DELETE moving the folder's messages to Trash; SUBSCRIBE and
  *   UNSUBSCRIBE are compatibility answers over "every visible mailbox is subscribed".
- * COPY and APPEND are refused before any storage call. UIDPLUS's APPENDUID and COPYUID for COPY are owed only by a successful
- * APPEND or COPY, which do not exist yet.
+ * - APPEND (A5.7) into Drafts only, for principals with management access, through A3's
+ *   appendImapDraft: the message literal bypasses ordinary framing (the framer hands over an
+ *   `append` item and holds; see append()), is kept byte for byte, and the tagged answer
+ *   carries UIDPLUS's APPENDUID from the UID the commit read back.
+ * COPY is refused before any storage call; COPYUID for COPY is owed only by a COPY, which does not exist yet.
  *
  * IDLE (A5.4, RFC 2177) waits for DONE while polling the database, never a process-local
  * event: A3's getImapChangeSignal (authority, mailbox revision, UIDVALIDITY) at a jittered
@@ -99,7 +103,7 @@ export const AUTH_FAILURE_DELAY_MS = 1000;
 const SELECTED_FLAGS = "(\\Seen \\Flagged \\Deleted \\Draft)";
 const PERMANENT_FLAG_NAMES: Record<ImapFlagName, string> = { seen: "\\Seen", flagged: "\\Flagged", deleted: "\\Deleted" };
 /** Commands that would write and are not available; refused before any storage call. */
-const UNSUPPORTED_COMMANDS = new Set(["COPY", "APPEND"]);
+const UNSUPPORTED_COMMANDS = new Set(["COPY"]);
 const STATUS_ITEMS = new Set(["MESSAGES", "RECENT", "UIDNEXT", "UIDVALIDITY", "UNSEEN"]);
 const MAX_ID_PAIRS = 30;
 
@@ -129,6 +133,13 @@ export type SessionTimeouts = {
 	loginMs: number;
 	unauthenticatedIdleMs: number;
 	authenticatedIdleMs: number;
+	/**
+	 * APPEND (A5.7): an accepted message literal must arrive within this base plus its size at
+	 * this minimum average rate, counted from the continuation; its octets never extend it.
+	 * DEFAULT_APPEND_TIMING when absent.
+	 */
+	appendLiteralBaseMs?: number;
+	appendLiteralMinBytesPerSecond?: number;
 };
 
 /** Receives the line answering a continuation, a framing error in its place, or null when the session closes. */
@@ -146,6 +157,8 @@ export class ImapSession {
 	private failures = 0;
 	/** Receives the next continuation line (AUTHENTICATE, IDLE), or a framing error, or null on close. */
 	private continuationWaiter: ContinuationWaiter | null = null;
+	/** Receives the end of an accepted APPEND literal (`append-end`), a framing error in its place, or null when the session closes. */
+	private appendWaiter: ContinuationWaiter | null = null;
 	private readonly cache: MetadataCache;
 	private readonly host: ImapSessionHost;
 	private readonly idleTiming: IdleTiming;
@@ -204,6 +217,8 @@ export class ImapSession {
 			maxLine: authenticated ? MAX_LINE : PREAUTH_MAX_LINE,
 			maxLiteral: authenticated ? AUTH_MAX_LITERAL : PREAUTH_MAX_LITERAL,
 			maxLiterals: MAX_LITERALS_PER_COMMAND,
+			// Before authentication APPEND is an ordinary command (and refused), so its literal is ordinary too.
+			appendLiterals: authenticated,
 		};
 	}
 
@@ -298,6 +313,9 @@ export class ImapSession {
 		const waiter = this.continuationWaiter;
 		this.continuationWaiter = null;
 		waiter?.(null);
+		const appendWaiter = this.appendWaiter;
+		this.appendWaiter = null;
+		appendWaiter?.(null);
 	}
 
 	private fill(): void {
@@ -314,9 +332,18 @@ export class ImapSession {
 				waiter(item);
 				continue;
 			}
+			// Likewise the end of an accepted APPEND literal, or the framing error that replaced it.
+			if (this.appendWaiter && (item.kind === "append-end" || item.kind === "error")) {
+				const waiter = this.appendWaiter;
+				this.appendWaiter = null;
+				waiter(item);
+				continue;
+			}
 			this.queue.push(item);
 		}
-		const full = this.queue.length >= MAX_QUEUED_COMMANDS;
+		// While an APPEND literal awaits the session's decision nothing is framed, so reading stops too:
+		// a client that sends before the continuation cannot make the framer buffer grow.
+		const full = this.queue.length >= MAX_QUEUED_COMMANDS || this.framer.holding;
 		if (full && !this.paused) {
 			this.paused = true;
 			this.host.pause();
@@ -352,10 +379,11 @@ export class ImapSession {
 			} else await this.send(`${item.tag ?? "*"} BAD ${item.message}`);
 			return;
 		}
-		if (item.kind === "continuation") {
+		if (item.kind === "continuation" || item.kind === "append-end") {
 			await this.send("* BAD Unexpected continuation");
 			return;
 		}
+		if (item.kind === "append") return this.append(item);
 		const reader = new CommandReader(item.parts);
 		let tag: string;
 		try {
@@ -395,6 +423,8 @@ export class ImapSession {
 			await this.send(`${tag} NO [NOPERM] ${responseText(error.message)}`);
 		} else if (error instanceof ImapStateError && error.code === "unsupported") {
 			await this.send(`${tag} NO [CANNOT] ${responseText(error.message)}`);
+		} else if (error instanceof ImapStateError && error.code === "limit") {
+			await this.send(`${tag} NO [LIMIT] ${responseText(error.message)}`);
 		} else {
 			this.host.log({ event: "command.error", command, error: error instanceof Error ? error.message : String(error) });
 			await this.send(`${tag} NO [UNAVAILABLE] Temporary failure, try again later`);
@@ -403,6 +433,140 @@ export class ImapSession {
 
 	private async wrongState(tag: string): Promise<void> {
 		await this.send(`${tag} BAD Command not valid in this state`);
+	}
+
+	// ---- APPEND (A5.7) ----------------------------------------------------------
+
+	/**
+	 * APPEND into Drafts, from an `append` item: the command up to its message literal, with
+	 * the framer holding (reading paused) until this decides. Everything that can be refused
+	 * without the message is refused first, so its octets are never read: syntax, \Deleted, the
+	 * size (at most MAX_APPEND_SIZE, not empty), the mailbox (Drafts by its stable key only),
+	 * the permission (management access), then an upload permit (the host's per-user and
+	 * global limits; waiting for one allocates nothing and sends nothing). Only then is the
+	 * buffer of exactly the announced size allocated and the continuation sent; the octets go
+	 * there and nowhere else, under an absolute deadline that they never extend. The rest of
+	 * the command line must be empty (no MULTIAPPEND). A3's appendImapDraft re-authorizes,
+	 * parses, stores and commits; the tagged answer carries APPENDUID from its commit. The
+	 * permit is held until that answer is written, and released on every way out.
+	 */
+	private async append(item: Extract<FramedItem, { kind: "append" }>): Promise<void> {
+		let decided = false;
+		const refuse = () => {
+			if (decided) return;
+			decided = true;
+			this.framer.refuseAppend();
+			this.fill();
+		};
+		let release: (() => void) | null = null;
+		const reader = new CommandReader(item.parts);
+		let tag: string;
+		try {
+			tag = reader.atom("]");
+			if (tag.includes("+")) throw new ImapSyntaxError("Invalid tag");
+			reader.sp();
+			reader.keyword();
+		} catch {
+			refuse();
+			await this.send("* BAD Invalid tag");
+			return;
+		}
+		try {
+			const request = readAppend(reader);
+			if (request.deleted) {
+				refuse();
+				return await this.send(`${tag} NO [CANNOT] \\Deleted cannot be set by APPEND`);
+			}
+			if (item.size > MAX_APPEND_SIZE) {
+				refuse();
+				return await this.send(`${tag} NO [LIMIT] Message too large`);
+			}
+			if (item.size === 0) {
+				refuse();
+				return await this.send(`${tag} NO [CANNOT] Empty message`);
+			}
+			const mailbox = findMailbox(await this.mailboxes(), request.mailbox);
+			if (!mailbox) {
+				refuse();
+				return await this.send(`${tag} NO [NONEXISTENT] No such mailbox`);
+			}
+			if (mailbox.key !== "drafts") {
+				refuse();
+				return await this.send(`${tag} NO [CANNOT] APPEND is only available for Drafts`);
+			}
+			if (!mailbox.mayWrite) {
+				refuse();
+				return await this.send(`${tag} NO [NOPERM] This access does not allow creating drafts`);
+			}
+			release = await this.host.acquireAppend(this.principal!.userId);
+			if (this.closed) return;
+
+			const buffer = new Uint8Array(item.size);
+			const received = new Promise<FramedItem | null>((resolve) => (this.appendWaiter = resolve));
+			decided = true;
+			this.framer.acceptAppend(buffer);
+			await this.send("+ Ready for literal data");
+			// Octets already buffered (a client that did not wait) go into the buffer now, and reading resumes.
+			this.fill();
+			const ended = await this.receiveAppend(received, item.size);
+			if (!ended) return;
+			if (ended.kind === "error") {
+				this.host.log({ event: "protocol.violation", reason: ended.message });
+				return await this.end(ended.message);
+			}
+			if (ended.kind !== "append-end" || ended.trailing !== "") return await this.send(`${tag} BAD Unexpected data after the message`);
+
+			const result = await appendImapDraft(this.env, this.principal!, { bytes: buffer, internalDate: request.internalDate, flagged: request.flagged });
+			this.host.log({ event: "append", uid: result.uid, size: item.size });
+			if (this.state === "selected") {
+				// RFC 3501 §6.3.11: a selected mailbox learns of the new message at once (EXISTS).
+				try {
+					await this.refresh(true);
+				} catch (error) {
+					if (error instanceof SessionEnd || (error instanceof ImapStateError && error.code === "forbidden")) throw error;
+					this.host.log({ event: "append.refresh-failed", error: error instanceof Error ? error.message : String(error) });
+				}
+			}
+			await this.send(`${tag} OK [APPENDUID ${result.uidValidity} ${result.uid}] APPEND completed`);
+		} catch (error) {
+			refuse();
+			await this.fail(tag, "APPEND", error);
+		} finally {
+			refuse();
+			release?.();
+		}
+	}
+
+	/** Wait for the accepted APPEND literal to end, or the session to close, or its deadline. */
+	private async receiveAppend(received: Promise<FramedItem | null>, size: number): Promise<FramedItem | null> {
+		const timeouts = this.options.timeouts;
+		if (!timeouts) return received;
+		const finished = new AbortController();
+		const timing = {
+			literalBaseMs: timeouts.appendLiteralBaseMs ?? DEFAULT_APPEND_TIMING.literalBaseMs,
+			literalMinBytesPerSecond: timeouts.appendLiteralMinBytesPerSecond ?? DEFAULT_APPEND_TIMING.literalMinBytesPerSecond,
+		};
+		// Absolute, from the continuation: nothing the client sends moves it.
+		const deadline = this.host.now() + appendLiteralDeadlineMs(size, timing);
+		const watch = async () => {
+			const signal = AbortSignal.any([finished.signal, this.lifetime.signal]);
+			while (!signal.aborted) {
+				const left = deadline - this.host.now();
+				if (left <= 0) {
+					this.host.log({ event: "append.timeout", size });
+					await this.end("Autologout");
+					return;
+				}
+				await this.host.delay(left, signal);
+			}
+		};
+		void watch();
+		try {
+			return await received;
+		} finally {
+			finished.abort();
+			this.appendWaiter = null;
+		}
 	}
 
 	private async dispatch(tag: string, command: string, reader: CommandReader): Promise<void> {
@@ -459,6 +623,9 @@ export class ImapSession {
 			case "LOGIN":
 			case "AUTHENTICATE":
 				return this.wrongState(tag);
+			case "APPEND":
+				// An APPEND with its message literal is an `append` item (append()); this one has none.
+				throw new ImapSyntaxError("APPEND needs a message literal");
 		}
 		if (UNSUPPORTED_COMMANDS.has(command) || command === "UID COPY") {
 			// Refused before any storage call, so nothing A3 holds is touched.
@@ -502,7 +669,7 @@ export class ImapSession {
 	}
 
 	private isKnown(command: string): boolean {
-		return ["LIST", "LSUB", "STATUS", "SELECT", "EXAMINE", "NAMESPACE", "CHECK", "CLOSE", "UNSELECT", "FETCH", "UID FETCH", "SEARCH", "UID SEARCH", "LOGIN", "AUTHENTICATE", "STORE", "UID STORE", "COPY", "UID COPY", "MOVE", "UID MOVE", "EXPUNGE", "UID EXPUNGE", "IDLE", "CREATE", "RENAME", "DELETE", "SUBSCRIBE", "UNSUBSCRIBE", ...UNSUPPORTED_COMMANDS].includes(command);
+		return ["LIST", "LSUB", "STATUS", "SELECT", "EXAMINE", "NAMESPACE", "CHECK", "CLOSE", "UNSELECT", "FETCH", "UID FETCH", "SEARCH", "UID SEARCH", "LOGIN", "AUTHENTICATE", "STORE", "UID STORE", "COPY", "UID COPY", "MOVE", "UID MOVE", "EXPUNGE", "UID EXPUNGE", "IDLE", "CREATE", "RENAME", "DELETE", "SUBSCRIBE", "UNSUBSCRIBE", "APPEND", ...UNSUPPORTED_COMMANDS].includes(command);
 	}
 
 	// ---- any state --------------------------------------------------------------

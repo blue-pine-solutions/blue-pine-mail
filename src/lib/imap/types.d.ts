@@ -117,7 +117,19 @@ export type ImapFlagStore = { mode: "replace" | "add" | "remove"; flags: ImapFla
  *   while authorizing), as opposed to evaluated and refused (`forbidden`). Only
  *   getImapChangeSignal reports it, so IDLE can fail closed on prolonged uncertainty.
  */
-export type ImapStateErrorCode = "forbidden" | "denied" | "unsupported" | "nonexistent" | "nonexistent-destination" | "unavailable" | "unconfirmed";
+export type ImapStateErrorCode = "forbidden" | "denied" | "unsupported" | "limit" | "nonexistent" | "nonexistent-destination" | "unavailable" | "unconfirmed";
+
+/** A draft created by IMAP APPEND (A5.7): the octets exactly as received, and what APPEND said about them. */
+export type ImapDraftAppend = {
+	bytes: Uint8Array;
+	/** APPEND's date-time, or null for now. It is INTERNALDATE (`created_at`); the Date header is never touched. */
+	internalDate: Date | null;
+	/** \Flagged was named: the draft is starred. */
+	flagged: boolean;
+};
+
+/** The committed draft: its UID in Drafts and that folder's UIDVALIDITY, as read back inside the commit (APPENDUID). */
+export type ImapAppendResult = { messageId: string; uid: number; uidValidity: number };
 
 /**
  * IDLE's cross-process change signal (A5.4, getImapChangeSignal), read from the database: the
