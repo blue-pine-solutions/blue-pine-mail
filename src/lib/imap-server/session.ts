@@ -88,6 +88,8 @@ export const DEFAULT_IDLE_TIMING: IdleTiming = {
 
 export const MAX_QUEUED_COMMANDS = 16;
 export const MAX_LINE = 64 * 1024;
+/** Before authentication a line only has to carry LOGIN, AUTHENTICATE and their answers (A5.6). */
+export const PREAUTH_MAX_LINE = 8 * 1024;
 export const PREAUTH_MAX_LITERAL = 1024;
 export const AUTH_MAX_LITERAL = 64 * 1024;
 export const MAX_LITERALS_PER_COMMAND = 16;
@@ -113,6 +115,20 @@ export type ImapSessionOptions = {
 	idle?: Partial<IdleTiming>;
 	/** Source of IDLE's jitter, in [0, 1). */
 	random?: () => number;
+	/** Autologout (A5.6), on the host's clock; none when absent (tests that do not need it). */
+	timeouts?: SessionTimeouts;
+};
+
+/**
+ * When a session is logged out. `loginMs` is an absolute deadline from the greeting that nothing
+ * the client sends extends; the idle limits count from the last complete command or continuation
+ * line the client sent (IDLE's DONE included): never raw octets, partial lines or literals, and
+ * never anything the server writes.
+ */
+export type SessionTimeouts = {
+	loginMs: number;
+	unauthenticatedIdleMs: number;
+	authenticatedIdleMs: number;
 };
 
 /** Receives the line answering a continuation, a framing error in its place, or null when the session closes. */
@@ -137,6 +153,12 @@ export class ImapSession {
 	/** When the last write to the client started, and how many are still pending (keepalive). */
 	private lastWriteAt = 0;
 	private pendingWrites = 0;
+	/** When the client last completed a command or continuation line (autologout). */
+	private activityAt = 0;
+	/** Aborted when the session closes, so its timers never outlive it. */
+	private readonly lifetime = new AbortController();
+	/** Aborted once authenticated: the login deadline no longer applies. */
+	private readonly loggedIn = new AbortController();
 
 	constructor(
 		private readonly env: CloudflareEnv,
@@ -177,11 +199,51 @@ export class ImapSession {
 	}
 
 	private limits(): FramerLimits {
-		return { maxLine: MAX_LINE, maxLiteral: this.isAuthenticated ? AUTH_MAX_LITERAL : PREAUTH_MAX_LITERAL, maxLiterals: MAX_LITERALS_PER_COMMAND };
+		const authenticated = this.isAuthenticated;
+		return {
+			maxLine: authenticated ? MAX_LINE : PREAUTH_MAX_LINE,
+			maxLiteral: authenticated ? AUTH_MAX_LITERAL : PREAUTH_MAX_LITERAL,
+			maxLiterals: MAX_LITERALS_PER_COMMAND,
+		};
 	}
 
 	async start(): Promise<void> {
+		const timeouts = this.options.timeouts;
+		if (timeouts) {
+			this.activityAt = this.host.now();
+			void this.loginDeadline(timeouts.loginMs);
+			void this.watchInactivity(timeouts);
+		}
 		await this.send(`* OK [CAPABILITY ${PREAUTH_CAPABILITIES}] ${responseText(this.options.serverName)} IMAP4rev1 ready`);
+	}
+
+	/** Logs out a session still unauthenticated `ms` after its greeting, whatever it sent meanwhile. */
+	private async loginDeadline(ms: number): Promise<void> {
+		const deadline = this.host.now() + ms;
+		while (!this.closed && !this.isAuthenticated) {
+			const left = deadline - this.host.now();
+			if (left <= 0) {
+				this.host.log({ event: "login.timeout" });
+				await this.end("Autologout");
+				return;
+			}
+			await this.host.delay(left, AbortSignal.any([this.lifetime.signal, this.loggedIn.signal]));
+		}
+	}
+
+	/** Logs out a session whose client completed nothing for the idle limit of its state. */
+	private async watchInactivity(timeouts: SessionTimeouts): Promise<void> {
+		while (!this.closed) {
+			const limit = this.isAuthenticated ? timeouts.authenticatedIdleMs : timeouts.unauthenticatedIdleMs;
+			const left = this.activityAt + limit - this.host.now();
+			if (left <= 0) {
+				this.host.log({ event: "idle.timeout", authenticated: this.isAuthenticated });
+				await this.end("Autologout; idle for too long");
+				return;
+			}
+			// Authenticating changes the limit, so it wakes the watch to measure again.
+			await this.host.delay(left, this.isAuthenticated ? this.lifetime.signal : AbortSignal.any([this.lifetime.signal, this.loggedIn.signal]));
+		}
 	}
 
 	/** Octets from the client. */
@@ -231,6 +293,7 @@ export class ImapSession {
 
 	private markClosed(): void {
 		this.closed = true;
+		this.lifetime.abort();
 		this.queue.length = 0;
 		const waiter = this.continuationWaiter;
 		this.continuationWaiter = null;
@@ -241,6 +304,8 @@ export class ImapSession {
 		while (!this.closed && this.queue.length < MAX_QUEUED_COMMANDS) {
 			const item = this.framer.next();
 			if (!item) break;
+			// Only complete items are activity: octets that never finish a line or literal are not.
+			this.activityAt = this.host.now();
 			// A command waiting for a continuation line gets it, or the framing error that
 			// replaced it (which it hands back to the queue), and nothing else.
 			if (this.continuationWaiter && (item.kind === "continuation" || item.kind === "error")) {
@@ -566,6 +631,7 @@ export class ImapSession {
 		}
 		this.principal = principal;
 		this.state = "authenticated";
+		this.loggedIn.abort();
 		this.host.onAuthenticated();
 		this.host.log({ event: "auth.success", userId: principal.userId, mailboxId: principal.mailboxId, appPasswordId: principal.appPasswordId });
 		await this.send(`${tag} OK [CAPABILITY ${AUTH_CAPABILITIES}] Logged in`);
@@ -889,16 +955,30 @@ export class ImapSession {
 	}
 
 	/** A message's canonical octets through A3; null when the UID is no longer valid. Throws `unavailable`. */
-	private async load(uid: number): Promise<Uint8Array | null> {
+	private async readContent(uid: number): Promise<Uint8Array | null> {
 		const selected = this.selected!;
-		const release = await this.host.acquireRead();
+		const content = await this.selectedCall(() => fetchImapMessage(this.env, this.principal!, selected.key, uid));
+		if (content) {
+			const entry = selected.entries.get(uid);
+			if (entry) entry.rfc822Size = content.size;
+		}
+		return content?.bytes ?? null;
+	}
+
+	/**
+	 * A content permit (the host's global limit and this user's own, A5.6): taken before a
+	 * message's octets are read and released once nothing derived from them is still being
+	 * written, so a client that stops reading holds its user's permits, never more.
+	 */
+	private acquireContent(): Promise<() => void> {
+		return this.host.acquireRead(this.principal!.userId);
+	}
+
+	/** A message's canonical octets for SEARCH, under a content permit for the read alone. */
+	private async load(uid: number): Promise<Uint8Array | null> {
+		const release = await this.acquireContent();
 		try {
-			const content = await this.selectedCall(() => fetchImapMessage(this.env, this.principal!, selected.key, uid));
-			if (content) {
-				const entry = selected.entries.get(uid);
-				if (entry) entry.rfc822Size = content.size;
-			}
-			return content?.bytes ?? null;
+			return await this.readContent(uid);
 		} finally {
 			release();
 		}
@@ -941,9 +1021,13 @@ export class ImapSession {
 			const key = metadataKey(this.principal!.mailboxId, selected.key, selected.uidValidity, uid);
 			let metadata = this.cache.get(key) ?? null;
 			let view: MessageView | null = null;
+			// Held from reading the octets until their response is written (or the message is skipped).
+			let release: (() => void) | null = null;
 			try {
 				if (needsContent(items, entry.rfc822Size, metadata)) {
-					const bytes = await this.load(uid);
+					release = await this.acquireContent();
+					if (this.closed) return;
+					const bytes = await this.readContent(uid);
 					if (this.closed) return;
 					if (!bytes) {
 						missing = true;
@@ -971,11 +1055,17 @@ export class ImapSession {
 				}
 				const response = new ResponseBuilder().raw("* ");
 				writeFetchResponse(response, answer, { seq, uid, flags: entry.flags, internalDate: entry.internalDate, knownSize: entry.rfc822Size, metadata, bytes: view?.bytes ?? null }, view, metadata);
-				await this.host.write(response.bytes());
+				// In parts, so a message's octets are written as they are, never copied into one response buffer.
+				for (const part of response.parts()) {
+					if (this.closed) return;
+					await this.host.write(part);
+				}
 			} catch (error) {
 				if (error instanceof SessionEnd || (error instanceof ImapStateError && error.code !== "unavailable")) throw error;
 				unavailable = true;
 				this.host.log({ event: "fetch.message-error", uid, error: error instanceof Error ? error.message : String(error) });
+			} finally {
+				release?.();
 			}
 		}
 		if (unavailable) return this.send(`${tag} NO [UNAVAILABLE] Some messages could not be read`);

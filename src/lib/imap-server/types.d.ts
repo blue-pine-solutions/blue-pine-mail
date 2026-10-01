@@ -116,8 +116,12 @@ export type ImapSessionHost = {
 	afterAuthenticate(username: string, ok: boolean): void;
 	/** Claim a per-user session slot once authenticated; false when the user is at the limit. */
 	claimUserSlot(userId: string): boolean;
-	/** Bound concurrent canonical-object reads across sessions. */
-	acquireRead(): Promise<() => void>;
+	/**
+	 * A permit for work on message content (A5.6): the host's global limit across sessions and
+	 * a per-user limit, so one user's slow or heavy sessions cannot hold every permit. Resolves
+	 * to the release function, which may be called more than once.
+	 */
+	acquireRead(userId: string): Promise<() => void>;
 	/** The session has just authenticated (e.g. to switch idle timeouts). */
 	onAuthenticated(): void;
 };

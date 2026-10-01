@@ -2,7 +2,7 @@ import PostalMime, { decodeWords } from "postal-mime";
 import { binaryToUtf8 } from "./bytes-utils";
 import { MessageView } from "./fetch";
 import { headerValue } from "./mime";
-import { matchSequenceNumbers, resolveUids } from "./sequence-set";
+import { sequenceMatcher } from "./sequence-set";
 import type { SearchKey, SnapshotEntry } from "./types";
 
 /**
@@ -107,12 +107,26 @@ function contains(haystack: string, needle: string): boolean {
 
 const HEADER_KEYS: Record<string, string> = { FROM: "from", TO: "to", CC: "cc", BCC: "bcc", SUBJECT: "subject" };
 
+/**
+ * Sequence-number and UID keys are compiled once each into range matchers (sequenceMatcher),
+ * whose size is that of the key as written: never a mailbox-sized set per key, which up to 256
+ * keys would multiply (A5.6).
+ */
 type Context = {
 	count: number;
 	uids: readonly number[];
-	sequenceSets: Map<SearchKey, Set<number>>;
-	uidSets: Map<SearchKey, Set<number>>;
+	matchers: Map<SearchKey, ReturnType<typeof sequenceMatcher>>;
 };
+
+function matcher(context: Context, key: Extract<SearchKey, { kind: "sequence" | "uid" }>) {
+	let compiled = context.matchers.get(key);
+	if (!compiled) {
+		// `*` is the last message for sequence numbers and the highest UID in use for UIDs.
+		const star = key.kind === "sequence" ? context.count : (context.uids[context.uids.length - 1] ?? 0);
+		context.matchers.set(key, (compiled = sequenceMatcher(key.set, star)));
+	}
+	return compiled;
+}
 
 function cheap(key: SearchKey, candidate: SearchCandidate, context: Context): Tri {
 	switch (key.kind) {
@@ -122,16 +136,10 @@ function cheap(key: SearchKey, candidate: SearchCandidate, context: Context): Tr
 			return key.value;
 		case "flag":
 			return candidate.entry.flags[key.flag] === key.value;
-		case "sequence": {
-			let set = context.sequenceSets.get(key);
-			if (!set) context.sequenceSets.set(key, (set = matchSequenceNumbers(key.set, context.count)));
-			return set.has(candidate.seq);
-		}
-		case "uid": {
-			let set = context.uidSets.get(key);
-			if (!set) context.uidSets.set(key, (set = new Set(resolveUids(key.set, context.uids))));
-			return set.has(candidate.uid);
-		}
+		case "sequence":
+			return matcher(context, key).has(candidate.seq);
+		case "uid":
+			return matcher(context, key).has(candidate.uid);
 		case "internaldate":
 			return compareDay(utcDay(candidate.entry.internalDate), key.op, key.day);
 		case "size": {
@@ -208,7 +216,7 @@ export async function runSearch(
 	load: (uid: number) => Promise<Uint8Array | null>,
 	cancelled: () => boolean,
 ): Promise<SearchCandidate[] | null> {
-	const context: Context = { count: mailbox.count, uids: mailbox.uids, sequenceSets: new Map(), uidSets: new Map() };
+	const context: Context = { count: mailbox.count, uids: mailbox.uids, matchers: new Map() };
 	const matches: SearchCandidate[] = [];
 	for (const candidate of candidates) {
 		if (cancelled()) return null;

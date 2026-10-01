@@ -449,16 +449,21 @@ test("a5.1: revoked credentials or shares end the session with BYE on the next S
 test("a5.1: access revoked between reading a body and its implicit \\Seen ends the session without writing", async (t) => {
 	const context = await install(app, t);
 	await deliverMany(context, ["m-1"]);
-	let revokeOnRelease = false;
-	let credentialId;
-	const connection = await connect(context, undefined, {
-		acquireRead: async () => () => {
-			if (revokeOnRelease) context.database.db.prepare("DELETE FROM mail_app_passwords WHERE id = ?").run(credentialId);
-		},
-	});
-	credentialId = connection.credentialId;
+	// Revoked as the stored octets are read: after A3 authorized the read, before the \Seen write.
+	// (The content permit is now held until the response is written, A5.6, so its release no
+	// longer marks this point.)
+	let revokeOnRead = false;
+	const connection = await connect(context);
+	const bucket = context.env.BUCKET;
+	const get = bucket.get.bind(bucket);
+	bucket.get = async (...args) => {
+		const object = await get(...args);
+		if (revokeOnRead) context.database.db.prepare("DELETE FROM mail_app_passwords WHERE id = ?").run(connection.credentialId);
+		return object;
+	};
+	t.after(() => (bucket.get = get));
 	await connection.client.command("SELECT INBOX");
-	revokeOnRelease = true;
+	revokeOnRead = true;
 	const result = await connection.client.command("FETCH 1 BODY[]");
 	assert.equal(result.tagged, null);
 	assert.equal(result.untagged.at(-1).text, "* BYE Access revoked");

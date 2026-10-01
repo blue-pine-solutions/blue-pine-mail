@@ -20,11 +20,14 @@ export async function loadApp(name) {
 	await build({
 		stdin: {
 			contents: `
-				export { ImapSession, PREAUTH_CAPABILITIES, AUTH_CAPABILITIES, DEFAULT_IDLE_TIMING, copyUidData } from "./src/lib/imap-server/session.ts";
+				export { ImapSession, PREAUTH_CAPABILITIES, AUTH_CAPABILITIES, DEFAULT_IDLE_TIMING, copyUidData, MAX_LINE, PREAUTH_MAX_LINE } from "./src/lib/imap-server/session.ts";
 				export { MetadataCache } from "./src/lib/imap-server/metadata-cache.ts";
 				export * as mime from "./src/lib/imap-server/mime.ts";
 				export * as names from "./src/lib/imap-server/mailbox-names.ts";
 				export { MessageView } from "./src/lib/imap-server/fetch.ts";
+				export * as search from "./src/lib/imap-server/search.ts";
+				export * as sequenceSet from "./src/lib/imap-server/sequence-set.ts";
+				export { ResponseBuilder } from "./src/lib/imap-server/response.ts";
 				export { startImapListener, readImapConfig, loadTlsMaterial, DEFAULT_IMAP_LIMITS } from "./server/runtime/imap.ts";
 				export * as limits from "./server/runtime/imap-limits.ts";
 				export * as imap from "./src/lib/imap/service.ts";

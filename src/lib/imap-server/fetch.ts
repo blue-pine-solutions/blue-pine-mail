@@ -58,13 +58,26 @@ export function needsContent(items: FetchItem[], knownSize: number | null, metad
 	});
 }
 
-/** A parsed view of the canonical octets, built once per message and dropped after it. */
+/**
+ * A parsed view of the canonical octets, built once per message and dropped after it. The byte
+ * string (`text`, one character per octet, a full copy of the message) is only made when
+ * something parses the message; a whole-message fetch (BODY[], RFC822) serves `bytes` as they
+ * are and never makes it (A5.6).
+ */
 export class MessageView {
-	readonly text: string;
+	private textCopy: string | null = null;
 	private tree: MimeEntity | null = null;
 
-	constructor(readonly bytes: Uint8Array) {
-		this.text = bytesToBinary(bytes);
+	constructor(readonly bytes: Uint8Array) {}
+
+	get text(): string {
+		this.textCopy ??= bytesToBinary(this.bytes);
+		return this.textCopy;
+	}
+
+	/** Whether `text` has been made (for tests). */
+	get hasText(): boolean {
+		return this.textCopy !== null;
 	}
 
 	get root(): MimeEntity {
@@ -96,6 +109,8 @@ export class MessageView {
 	/** The octets a BODY[section] names; empty when the section does not exist. */
 	section(section: BodySection): Uint8Array {
 		const empty = new Uint8Array(0);
+		// The whole message needs no parse.
+		if (!section.part.length && !section.text) return this.bytes;
 		let entity: MimeEntity | null = this.root;
 		if (section.part.length) {
 			entity = resolvePart(this.root, section.part);

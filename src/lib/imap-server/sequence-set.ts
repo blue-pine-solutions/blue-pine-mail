@@ -74,6 +74,32 @@ export function matchSequenceNumbers(set: SequenceSet, count: number): Set<numbe
 }
 
 /**
+ * Membership in a set, with `*` read as `star`, as merged ascending ranges searched by
+ * bisection: its size is that of the set as written, never that of the mailbox (A5.6). A
+ * sequence-number key of SEARCH with `star` = the message count matches exactly what
+ * matchSequenceNumbers names; a UID key with `star` = the highest UID exactly what resolveUids
+ * names (both only ever ask about numbers that exist).
+ */
+export function sequenceMatcher(set: SequenceSet, star: number): { ranges: ReadonlyArray<readonly [number, number]>; has(value: number): boolean } {
+	const ranges = normalize(set, star);
+	return {
+		ranges,
+		has(value) {
+			let low = 0;
+			let high = ranges.length - 1;
+			while (low <= high) {
+				const middle = (low + high) >> 1;
+				const [from, to] = ranges[middle];
+				if (value < from) high = middle - 1;
+				else if (value > to) low = middle + 1;
+				else return true;
+			}
+			return false;
+		},
+	};
+}
+
+/**
  * UIDs from `uids` (ascending) that a UID set names, ascending. `*` is the largest UID in
  * use, so `n:*` always includes the last message even when n is beyond it (RFC 3501 §6.4.8).
  * UIDs that do not exist are ignored.

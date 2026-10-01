@@ -80,7 +80,9 @@ export class CommandFramer {
 			const found = this.storage.subarray(this.start + this.scanned, this.end).indexOf(LF);
 			if (found < 0) {
 				this.scanned = this.end - this.start;
-				if (this.scanned > limits.maxLine) return this.fail("Command line too long");
+				// A line of exactly maxLine octets may still be waiting for the LF after its CR.
+				const pendingCr = this.storage[this.end - 1] === 0x0d ? 1 : 0;
+				if (this.scanned - pendingCr > limits.maxLine) return this.fail("Command line too long");
 				break;
 			}
 			const newline = this.start + this.scanned + found;

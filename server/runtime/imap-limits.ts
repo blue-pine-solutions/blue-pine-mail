@@ -96,6 +96,60 @@ export class Semaphore {
 			else this.available += 1;
 		};
 	}
+
+	/** Permits not held, and acquisitions still waiting for one. */
+	get free(): number {
+		return this.available;
+	}
+
+	get waiters(): number {
+		return this.waiting.length;
+	}
+}
+
+/**
+ * Permits for work on message content (A5.6): at most `perUser` per user and `global` in all.
+ * A request first waits for one of its user's permits and only then for a global one, so a
+ * user at its limit queues behind itself without taking a global permit another user could use.
+ */
+export class ContentReadLimiter {
+	private readonly global: Semaphore;
+	/** Per-user permits, with the requests holding or waiting for one; dropped when none are left. */
+	private readonly users = new Map<string, { semaphore: Semaphore; requests: number }>();
+
+	constructor(
+		global: number,
+		private readonly perUser: number,
+	) {
+		this.global = new Semaphore(global);
+	}
+
+	async acquire(userId: string): Promise<() => void> {
+		let user = this.users.get(userId);
+		if (!user) this.users.set(userId, (user = { semaphore: new Semaphore(this.perUser), requests: 0 }));
+		user.requests += 1;
+		const releaseUser = await user.semaphore.acquire();
+		const releaseGlobal = await this.global.acquire();
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			releaseGlobal();
+			releaseUser();
+			user.requests -= 1;
+			if (!user.requests) this.users.delete(userId);
+		};
+	}
+
+	/** Global permits not held (for tests and diagnostics). */
+	get globalFree(): number {
+		return this.global.free;
+	}
+
+	/** Users with a permit held or requested. */
+	get activeUsers(): number {
+		return this.users.size;
+	}
 }
 
 /**

@@ -51,6 +51,36 @@ export class ResponseBuilder {
 		this.flush();
 		return this.chunks.length === 1 ? this.chunks[0] : concatBytes(this.chunks);
 	}
+
+	/**
+	 * The response as an ordered list of parts to write one after another, without copying large
+	 * literals (A5.6): a literal of at least `copyLimit` octets is its own part, the very array it
+	 * was given; everything else is joined into parts of protocol text and small values. The
+	 * concatenation of the parts is exactly bytes().
+	 */
+	parts(copyLimit = 64 * 1024): Uint8Array[] {
+		this.flush();
+		const out: Uint8Array[] = [];
+		let pending: Uint8Array[] = [];
+		let pendingSize = 0;
+		const emit = () => {
+			if (pending.length) out.push(pending.length === 1 ? pending[0] : concatBytes(pending));
+			pending = [];
+			pendingSize = 0;
+		};
+		for (const chunk of this.chunks) {
+			if (chunk.byteLength >= copyLimit) {
+				emit();
+				out.push(chunk);
+				continue;
+			}
+			if (pendingSize + chunk.byteLength > copyLimit) emit();
+			pending.push(chunk);
+			pendingSize += chunk.byteLength;
+		}
+		emit();
+		return out;
+	}
 }
 
 /** Text for response lines (`resp-text`): no CR, LF or NUL. */
