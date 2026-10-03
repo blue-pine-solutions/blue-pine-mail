@@ -47,21 +47,21 @@ export function buildReplyReferences(parentReferences: string[], parentMessageId
  * its own Message-ID so later replies can find it.
  */
 export async function resolveThreadId(db: Db, input: ResolveThreadInput): Promise<string> {
+	return (await findParentThreadId(db, input)) ?? normalizeMessageId(input.messageId) ?? newId("thr");
+}
+
+/** The thread of the stored message a reply names in the same mailbox, or null. */
+export async function findParentThreadId(db: Db, input: Omit<ResolveThreadInput, "messageId">): Promise<string | null> {
 	const candidates = selectThreadLookupIds(input.inReplyTo, input.references ?? []);
-
-	if (input.mailboxId && candidates.length > 0) {
-		// Stored Message-IDs may or may not include their angle brackets.
-		const variants = candidates.flatMap((id) => [id, `<${id}>`]);
-		const [parent] = await db
-			.select({ threadId: messages.threadId, providerMessageId: messages.providerMessageId })
-			.from(messages)
-			.where(and(eq(messages.mailboxId, input.mailboxId), inArray(messages.providerMessageId, variants)))
-			.orderBy(asc(messages.createdAt))
-			.limit(1);
-		if (parent) {
-			return parent.threadId ?? normalizeMessageId(parent.providerMessageId) ?? newId("thr");
-		}
-	}
-
-	return normalizeMessageId(input.messageId) ?? newId("thr");
+	if (!input.mailboxId || candidates.length === 0) return null;
+	// Stored Message-IDs may or may not include their angle brackets.
+	const variants = candidates.flatMap((id) => [id, `<${id}>`]);
+	const [parent] = await db
+		.select({ threadId: messages.threadId, providerMessageId: messages.providerMessageId })
+		.from(messages)
+		.where(and(eq(messages.mailboxId, input.mailboxId), inArray(messages.providerMessageId, variants)))
+		.orderBy(asc(messages.createdAt))
+		.limit(1);
+	if (!parent) return null;
+	return parent.threadId ?? normalizeMessageId(parent.providerMessageId) ?? newId("thr");
 }

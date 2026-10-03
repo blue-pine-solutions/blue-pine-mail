@@ -1,4 +1,4 @@
-import { MIMEMessage } from "mimetext/browser";
+import { MIMEMessage, Mailbox } from "mimetext/browser";
 import { getEmailAddress } from "@/lib/email/address";
 import type { CanonicalAttachment, CanonicalMessageInput, CanonicalMessageKind, CanonicalRow } from "./canonical-message-types";
 
@@ -15,7 +15,7 @@ const EOL = "\r\n";
 const ENCODED_WORD_BYTES = 45;
 const MAX_HEADER_LINE = 998;
 /** Headers the builder writes itself; anything else in `headers` is carried over as-is. */
-const MANAGED_HEADERS = new Set(["from", "to", "cc", "bcc", "subject", "date", "message-id", "mime-version", "in-reply-to", "references", "content-type", "content-transfer-encoding", "content-disposition", "content-id"]);
+const MANAGED_HEADERS = new Set(["from", "to", "cc", "bcc", "subject", "date", "message-id", "mime-version", "in-reply-to", "references", "reply-to", "sender", "content-type", "content-transfer-encoding", "content-disposition", "content-id"]);
 const CANONICAL_PREFIX = "canonical/";
 
 const utf8 = new TextEncoder();
@@ -122,6 +122,8 @@ export function buildCanonicalMime(input: CanonicalMessageInput): string {
 	if (input.cc.length) message.setCc(recipients(input.cc));
 	// The sender's own copy keeps Bcc, as Sent items conventionally do; it was never part of what recipients received.
 	if (input.bcc.length) message.setBcc(recipients(input.bcc));
+	// mimetext only takes Reply-To as a mailbox; as a plain header it would refuse the message.
+	if (input.replyTo) message.setHeader("Reply-To", new Mailbox(toMailbox(input.replyTo)));
 	message.setSubject(input.subject);
 	message.setHeader("Date", input.date.toUTCString().replace(/GMT|UTC/i, "+0000"));
 	message.setHeader("Message-ID", angleMessageId(input.messageId));

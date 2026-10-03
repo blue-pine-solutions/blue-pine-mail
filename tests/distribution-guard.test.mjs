@@ -273,6 +273,23 @@ test("the IMAP state layer, flag writes included, stays Workers/D1-safe", () => 
 	assert.deepEqual(signalCallers, [join("src", "lib", "imap-server", "session.ts")]);
 });
 
+test("SMTP-1: the submission adapter is protocol-free, and no submission listener exists yet", () => {
+	// The adapter is a library: no sockets, no Node APIs, no SMTP server, no raw relay.
+	for (const file of sourceFiles(join("src", "lib", "submission"))) {
+		const source = read(file);
+		assert.doesNotMatch(source, /from\s+["'](?:node:|smtp-server|nodemailer|net["']|tls["'])|\bBuffer\b|\bprocess\./, `${file} must stay runtime-neutral`);
+		assert.doesNotMatch(source, /sendRaw|EMAIL\.send\(/, `${file} must send through sendEmail, never the transport`);
+	}
+	// Only the adapter discards failed attempts.
+	const discarders = sourceFiles("src").filter((file) => /failedAttempt:\s*"discard"/.test(read(file)));
+	assert.deepEqual(discarders, [join("src", "lib", "submission", "service.ts")]);
+	// The only SMTP server is the inbound one; nothing configures or calls submission yet (SMTP-2).
+	const everything = [...sourceFiles("server"), ...sourceFiles("src"), "worker.ts"];
+	assert.deepEqual(everything.filter((file) => /new SMTPServer\(/.test(read(file))), [join("server", "runtime", "smtp.ts")]);
+	assert.deepEqual(everything.filter((file) => /SMTP_SUBMISSION_PORT/.test(read(file))), []);
+	assert.deepEqual(everything.filter((file) => /from\s+["'](?:@\/lib\/submission|[^"']*\/lib\/submission\/)/.test(read(file)) && !file.startsWith(join("src", "lib", "submission"))), []);
+});
+
 const workersBuild = join(root, "dist", "server");
 test("the Workers build output contains no IMAP listener", { skip: !existsSync(workersBuild) && "no Workers build in dist/server (run npm run build)" }, () => {
 	const files = readdirSync(workersBuild, { recursive: true }).map(String).filter((file) => /\.(m?js)$/.test(file));

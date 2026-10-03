@@ -103,12 +103,13 @@ export class Mailer {
 			});
 			if (!response.ok) {
 				const detail = await response.text().catch(() => "");
-				throw new Error(`Cloudflare Email Sending failed (${response.status}): ${detail.slice(0, 300)}`);
+				// The status lets the send path tell a rejection from a temporary failure.
+				throw Object.assign(new Error(`Cloudflare Email Sending failed (${response.status}): ${detail.slice(0, 300)}`), { status: response.status });
 			}
 			return { messageId };
 		}
 
-		throw new Error("Outbound mail is not configured. Set SMTP_URL, or CF_ACCOUNT_ID and CF_TOKEN.");
+		throw Object.assign(new Error("Outbound mail is not configured. Set SMTP_URL, or CF_ACCOUNT_ID and CF_TOKEN."), { code: "ENOTCONFIGURED" });
 	}
 
 	/** Relay a raw RFC 5322 message unchanged, for forwarding rules. SMTP only. */

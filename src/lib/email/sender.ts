@@ -5,6 +5,7 @@ import { getMailboxAccessLevel } from "@/lib/mailboxes/access";
 import { formatEmailAddress, getEmailAddress } from "@/lib/email/address";
 import { getMailboxDomainAddresses } from "@/lib/mailboxes/domain-addresses";
 import { resolveMailboxDisplayName } from "@/lib/profile/identity-utils";
+import { SendError } from "@/lib/email/send-result-utils";
 
 export async function getAuthorizedSenderAddress(
 	env: CloudflareEnv,
@@ -14,7 +15,7 @@ export async function getAuthorizedSenderAddress(
 		mailboxId?: string | null;
 	},
 ): Promise<{ fromAddr: string; mailboxId: string }> {
-	if (!input.mailboxId) throw new Error("Mailbox is required");
+	if (!input.mailboxId) throw new SendError("invalid_message", "mailbox_required", "Mailbox is required");
 
 	const db = getDb(env);
 	const [mailbox] = await db
@@ -35,19 +36,19 @@ export async function getAuthorizedSenderAddress(
 		.where(eq(mailboxes.id, input.mailboxId))
 		.limit(1);
 
-	if (!mailbox) throw new Error("Mailbox not found");
+	if (!mailbox) throw new SendError("unauthorized_sender", "mailbox_not_found", "Mailbox not found");
 	const [actor] = await db.select().from(users).where(eq(users.id, input.userId)).limit(1);
-	if (!actor || actor.disabled) throw new Error("Sender account not found");
+	if (!actor || actor.disabled) throw new SendError("unauthorized_sender", "sender_account_unavailable", "Sender account not found");
 
 	const access = await getMailboxAccessLevel(db, actor, mailbox.id);
 	if (!access?.canSendOnBehalf) {
-		throw new Error("You do not have permission to send from this mailbox");
+		throw new SendError("unauthorized_sender", "send_permission_denied", "You do not have permission to send from this mailbox");
 	}
 
 	const requestedAddress = getEmailAddress(input.from);
 	const permittedAddresses = await getMailboxDomainAddresses(db, mailbox);
 	if (!permittedAddresses.includes(requestedAddress.toLowerCase())) {
-		throw new Error("Sender address does not match the selected mailbox");
+		throw new SendError("unauthorized_sender", "sender_address_not_permitted", "Sender address does not match the selected mailbox");
 	}
 	const senderAddress = requestedAddress.toLowerCase();
 	// The primary mailbox sends under the account name; every other mailbox

@@ -18,6 +18,8 @@ export type CanonicalMessageInput = {
 	messageId: string;
 	inReplyTo?: string | null;
 	references?: string[];
+	/** One Reply-To address, optionally with a display name. */
+	replyTo?: string | null;
 	text?: string | null;
 	html?: string | null;
 	headers?: Record<string, string>;

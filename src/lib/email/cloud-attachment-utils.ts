@@ -1,6 +1,7 @@
 import type { AttachmentContent } from "./attachment-types";
 import { CLOUD_ATTACHMENT_THRESHOLD_BYTES } from "./attachment-policy";
 import { getOrCreateSharedAttachmentUrl } from "./shared-attachments";
+import { SendError } from "./send-result-utils";
 
 const GENERAL_MESSAGE_LIMIT_BYTES = 5 * 1024 * 1024;
 const MIME_SAFETY_MARGIN_BYTES = 256 * 1024;
@@ -26,11 +27,11 @@ export async function prepareCloudflareAttachments(
 			estimatedSize += encodedSize;
 			continue;
 		}
-		if (!attachment.storageId) throw new Error("Large attachment was not stored in R2");
+		if (!attachment.storageId) throw new SendError("internal_temporary", "attachment_not_stored", "Large attachment was not stored in R2");
 		linked.push({ filename: attachment.filename, size, url: await getOrCreateSharedAttachmentUrl(env, attachment.storageId, message.publicOrigin) });
 	}
 	if (!linked.length) {
-		if (estimatedSize > GENERAL_MESSAGE_LIMIT_BYTES - MIME_SAFETY_MARGIN_BYTES) throw new Error("Message exceeds Cloudflare's 5 MiB email size limit");
+		if (estimatedSize > GENERAL_MESSAGE_LIMIT_BYTES - MIME_SAFETY_MARGIN_BYTES) throw new SendError("invalid_message", "message_too_large_for_transport", "Message exceeds Cloudflare's 5 MiB email size limit");
 		return { attachments: direct, html: message.html, text: message.text };
 	}
 	const intro = "Files shared with you (download links expire after 30 days):";
@@ -39,7 +40,7 @@ export async function prepareCloudflareAttachments(
 	const text = [message.text?.trim(), intro, textLinks].filter(Boolean).join("\n\n");
 	const html = `${message.html ?? ""}<div><p>${escapeHtml(intro)}</p><ul>${htmlLinks}</ul></div>`;
 	if (estimatedSize + encoder.encode(textLinks + htmlLinks + intro + intro).byteLength + 4096 > GENERAL_MESSAGE_LIMIT_BYTES - MIME_SAFETY_MARGIN_BYTES) {
-		throw new Error("Message exceeds Cloudflare's 5 MiB email size limit even with download links");
+		throw new SendError("invalid_message", "message_too_large_for_transport", "Message exceeds Cloudflare's 5 MiB email size limit even with download links");
 	}
 	return { attachments: direct, html, text };
 }
