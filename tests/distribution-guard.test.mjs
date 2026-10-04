@@ -273,30 +273,51 @@ test("the IMAP state layer, flag writes included, stays Workers/D1-safe", () => 
 	assert.deepEqual(signalCallers, [join("src", "lib", "imap-server", "session.ts")]);
 });
 
-test("SMTP-1: the submission adapter is protocol-free, and no submission listener exists yet", () => {
+test("SMTP-1: the submission adapter is protocol-free and only discards its own failed attempts", () => {
 	// The adapter is a library: no sockets, no Node APIs, no SMTP server, no raw relay.
 	for (const file of sourceFiles(join("src", "lib", "submission"))) {
 		const source = read(file);
-		assert.doesNotMatch(source, /from\s+["'](?:node:|smtp-server|nodemailer|net["']|tls["'])|\bBuffer\b|\bprocess\./, `${file} must stay runtime-neutral`);
+		assert.doesNotMatch(source, /from\s+["'](?:node:|smtp-server|nodemailer|net["']|tls["'])|Buffer|process\./, `${file} must stay runtime-neutral`);
 		assert.doesNotMatch(source, /sendRaw|EMAIL\.send\(/, `${file} must send through sendEmail, never the transport`);
 	}
 	// Only the adapter discards failed attempts.
 	const discarders = sourceFiles("src").filter((file) => /failedAttempt:\s*"discard"/.test(read(file)));
 	assert.deepEqual(discarders, [join("src", "lib", "submission", "service.ts")]);
-	// The only SMTP server is the inbound one; nothing configures or calls submission yet (SMTP-2).
-	const everything = [...sourceFiles("server"), ...sourceFiles("src"), "worker.ts"];
-	assert.deepEqual(everything.filter((file) => /new SMTPServer\(/.test(read(file))), [join("server", "runtime", "smtp.ts")]);
-	assert.deepEqual(everything.filter((file) => /SMTP_SUBMISSION_PORT/.test(read(file))), []);
-	assert.deepEqual(everything.filter((file) => /from\s+["'](?:@\/lib\/submission|[^"']*\/lib\/submission\/)/.test(read(file)) && !file.startsWith(join("src", "lib", "submission"))), []);
+});
+
+test("SMTP-2: the submission listener is Node-only, opt-in, and the adapter's only caller", () => {
+	const listener = join("server", "runtime", "smtp-submission.ts");
+	const replies = join("server", "runtime", "smtp-submission-replies.ts");
+	const everything = [...sourceFiles("server"), ...sourceFiles("src"), "worker.ts", "worker-utils.ts"];
+	// Two SMTP servers: inbound (smtp.ts) and submission. Nothing else listens for SMTP.
+	assert.deepEqual(everything.filter((file) => /new SMTPServer\(/.test(read(file))).sort(), [join("server", "runtime", "smtp.ts"), listener].sort());
+	// The port variable is named only by the listener's configuration and the entrypoint, which alone starts it.
+	assert.deepEqual(everything.filter((file) => /SMTP_SUBMISSION_PORT/.test(read(file))).sort(), [join("server", "index.ts"), listener].sort());
+	assert.deepEqual(everything.filter((file) => /startSubmissionListener\(/.test(read(file)) && file !== listener), [join("server", "index.ts")]);
+	// Outside the adapter itself, only the listener and its reply mapping import it.
+	const importers = everything.filter((file) => /from\s+["'](?:@\/lib\/submission|[^"']*\/lib\/submission\/)/.test(read(file)) && !file.startsWith(join("src", "lib", "submission")));
+	assert.deepEqual(importers.sort(), [listener, replies].sort());
+	// Nothing the Worker compiles reaches the listener.
+	for (const file of ["worker.ts", "worker-utils.ts", ...sourceFiles("src")]) {
+		assert.doesNotMatch(read(file), /from\s+["'][^"']*smtp-submission/, `${file} must not import the submission listener`);
+	}
+	// Implicit TLS only: no STARTTLS, no plaintext AUTH, TLS terminated by Node at 1.2 or later.
+	const source = read(listener);
+	assert.match(source, /const TLS_MIN_VERSION = "TLSv1\.2";/);
+	assert.match(source, /secured: true,/);
+	assert.match(source, /disabledCommands: \["STARTTLS",/);
+	assert.doesNotMatch(source, /allowInsecureAuth|authOptional|needsUpgrade/);
+	// It never relays raw MIME: every message goes through submitMessage.
+	assert.doesNotMatch(source, /sendRaw|EMAIL\.send\(|sendEmail\(/);
 });
 
 const workersBuild = join(root, "dist", "server");
-test("the Workers build output contains no IMAP listener", { skip: !existsSync(workersBuild) && "no Workers build in dist/server (run npm run build)" }, () => {
+test("the Workers build output contains no IMAP or SMTP submission listener", { skip: !existsSync(workersBuild) && "no Workers build in dist/server (run npm run build)" }, () => {
 	const files = readdirSync(workersBuild, { recursive: true }).map(String).filter((file) => /\.(m?js)$/.test(file));
 	assert.ok(files.length > 0, "the Workers build has JavaScript output");
 	for (const file of files) {
 		const code = readFileSync(join(workersBuild, file), "utf8");
-		for (const marker of ["startImapListener", "IMAP4rev1 SASL-IR AUTH=PLAIN ID", "IMAP_TLS_CERT", "Non-synchronizing literals are not supported"]) {
+		for (const marker of ["startImapListener", "IMAP4rev1 SASL-IR AUTH=PLAIN ID", "IMAP_TLS_CERT", "Non-synchronizing literals are not supported", "startSubmissionListener", "SMTP_SUBMISSION_PORT"]) {
 			assert.ok(!code.includes(marker), `${file} contains "${marker}"`);
 		}
 	}

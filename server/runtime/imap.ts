@@ -107,29 +107,33 @@ export function readImapConfig(env: Record<string, string | undefined> = process
 	return { port, host: env.IMAP_HOST?.trim() || "0.0.0.0", certPath, keyPath };
 }
 
+/** The names an error about TLS material refers to: the variables the paths came from. */
+export type TlsMaterialNames = { cert: string; key: string; label: string };
+const IMAP_TLS_NAMES: TlsMaterialNames = { cert: "IMAP_TLS_CERT", key: "IMAP_TLS_KEY", label: "IMAP" };
+
 /** Read and validate the PEM certificate chain and key. Throws a message naming what is wrong. */
-export function loadTlsMaterial(config: Pick<ImapListenerConfig, "certPath" | "keyPath">): TlsMaterial {
+export function loadTlsMaterial(config: Pick<ImapListenerConfig, "certPath" | "keyPath">, names: TlsMaterialNames = IMAP_TLS_NAMES): TlsMaterial {
 	let cert: Buffer;
 	let key: Buffer;
 	try {
 		cert = readFileSync(config.certPath);
 	} catch (error) {
-		throw new Error(`IMAP_TLS_CERT (${config.certPath}) cannot be read: ${(error as Error).message}`);
+		throw new Error(`${names.cert} (${config.certPath}) cannot be read: ${(error as Error).message}`);
 	}
 	try {
 		key = readFileSync(config.keyPath);
 	} catch (error) {
-		throw new Error(`IMAP_TLS_KEY (${config.keyPath}) cannot be read: ${(error as Error).message}`);
+		throw new Error(`${names.key} (${config.keyPath}) cannot be read: ${(error as Error).message}`);
 	}
 	try {
 		new X509Certificate(cert);
 	} catch (error) {
-		throw new Error(`IMAP_TLS_CERT (${config.certPath}) is not a PEM certificate: ${(error as Error).message}`);
+		throw new Error(`${names.cert} (${config.certPath}) is not a PEM certificate: ${(error as Error).message}`);
 	}
 	try {
 		createSecureContext({ key, cert, minVersion: TLS_MIN_VERSION });
 	} catch (error) {
-		throw new Error(`IMAP TLS key and certificate are unusable together: ${(error as Error).message}`);
+		throw new Error(`${names.label} TLS key and certificate are unusable together: ${(error as Error).message}`);
 	}
 	return { key, cert };
 }

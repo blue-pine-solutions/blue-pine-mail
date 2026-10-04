@@ -16,10 +16,12 @@ import { loadTlsMaterial, readImapConfig, startImapListener } from "./runtime/im
 import { applyMigrations } from "./runtime/migrate";
 import { startScheduler } from "./runtime/scheduler";
 import { startSmtpListener } from "./runtime/smtp";
+import { loadSubmissionTlsMaterial, readSubmissionConfig, startSubmissionListener, type SubmissionListener } from "./runtime/smtp-submission";
 
 /**
  * The self-hosted entrypoint: one Node process serving the Next app, the
- * realtime WebSocket, the SMTP listener, the read-only IMAP listener, the job
+ * realtime WebSocket, the inbound SMTP listener, the IMAP listener, the
+ * authenticated SMTP submission listener (opt-in), the job
  * queues and the backup schedule, the same jobs worker.ts spreads across
  * Cloudflare products (IMAP has no Workers counterpart).
  */
@@ -27,6 +29,9 @@ async function main() {
 	// IMAP is opt-in (IMAP_PORT); when enabled, unusable TLS material stops startup here.
 	const imapConfig = readImapConfig();
 	const imapTls = imapConfig ? loadTlsMaterial(imapConfig) : null;
+	// SMTP submission is opt-in too (SMTP_SUBMISSION_PORT), and is validated just as early.
+	const submissionConfig = readSubmissionConfig();
+	const submissionTls = submissionConfig ? loadSubmissionTlsMaterial(submissionConfig) : null;
 	const port = Number(process.env.PORT ?? 3000);
 	const host = process.env.HOST ?? "0.0.0.0";
 	const dev = process.env.NODE_ENV !== "production";
@@ -93,10 +98,20 @@ async function main() {
 	}
 	const imap = imapConfig && imapTls ? await startImapListener(env, imapConfig, imapTls) : null;
 	if (imap) process.on("SIGHUP", () => imap.reloadCertificates());
+	// A submission listener that cannot bind is reported; inbound SMTP, IMAP and the app keep running.
+	let submission: SubmissionListener | null = null;
+	if (submissionConfig && submissionTls) {
+		submission = await startSubmissionListener(env, submissionConfig, submissionTls).catch((error: Error) => {
+			console.error(`SMTP submission listener failed to start on ${submissionConfig.host}:${submissionConfig.port}: ${error.message}`);
+			return null;
+		});
+	}
+	if (submission) process.on("SIGHUP", () => submission.reloadCertificates());
 	const stopScheduler = startScheduler(env);
 
 	const shutdown = () => {
 		void imap?.close();
+		void submission?.close();
 		stopScheduler();
 		runtime.inboundQueue.stop();
 		runtime.outboundQueue.stop();

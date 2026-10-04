@@ -62,6 +62,34 @@ The application keeps running as the unprivileged `node` user; Docker lets conta
 
 **Limits.** Per server instance: 500 connections in total, 20 per client address (IPv6 per /64), and 20 signed-in connections per account. After 10 failed sign-ins from one address in 15 minutes, further attempts from it fail for the rest of the window; after 20 failures for one username, its attempts are slowed rather than blocked, so nobody can lock another person out. Three failures end a connection. Idle connections close after 60 seconds before sign-in and 30 minutes after. These limits are held in memory by each instance and reset on restart; several instances behind a load balancer each enforce them separately.
 
+## Sending from mail clients (SMTP submission)
+
+The container can also accept mail from desktop and phone mail clients and send it the same way the web app does: the message lands in the mailbox's **Sent** folder (visible over IMAP and JMAP too) and goes out through the configured sending path (`SMTP_URL` or Cloudflare Email Sending). It is off unless you enable it, and it only speaks SMTP over implicit TLS (port 465); there is no plaintext or STARTTLS submission port.
+
+```bash
+SMTP_SUBMISSION_PORT=465
+SMTP_SUBMISSION_HOST=0.0.0.0                       # in a container; the default is 127.0.0.1
+SMTP_SUBMISSION_TLS_CERT=/data/tls/fullchain.pem   # optional: defaults to IMAP_TLS_CERT/KEY
+SMTP_SUBMISSION_TLS_KEY=/data/tls/privkey.pem
+```
+
+Publish the port in `docker-compose.yml`:
+
+```yaml
+    ports:
+      - "465:465"     # SMTP submission over TLS
+```
+
+The certificate rules are the same as for IMAP: unusable files stop startup with a message naming the variables, and `SIGHUP` reloads them. If neither `SMTP_SUBMISSION_TLS_*` variable is set, the IMAP certificate is used. Only TLS 1.2 and later are accepted. If the port cannot be bound, the error is logged and everything else keeps running.
+
+**Signing in.** AUTH PLAIN or LOGIN, with the mailbox address as the username and a mail app password that has the **SMTP** scope for that mailbox (the web password never works). A client can only send as that mailbox's address, and the message's From must match it.
+
+**In the mail client:** server port 465, connection security "SSL/TLS", authentication "Normal password". Turn off the client's own "Place a copy in Sent" (Thunderbird: Account Settings → Copies & Folders), because the server already files the sent message; leaving it on gives two copies.
+
+**What is refused.** Messages without a To recipient (Cc- or Bcc-only), signed or encrypted (S/MIME, PGP/MIME) messages, `SMTPUTF8` addresses, and messages over 36 MiB. If the connection to the relay fails in a way where the message may already have gone out (the relay may have accepted it before the connection dropped), the client gets a temporary error saying "Delivery status unknown" and will normally try again later. That retry can produce a duplicate if the first attempt was in fact delivered: the server cannot know, and prefers a possible duplicate to a lost message. A failed attempt leaves nothing in Sent (only accepted messages are filed there), so Sent cannot settle it; only the recipient or the relay's logs can.
+
+**Limits.** Per server instance: 100 connections, 10 per client address and 10 signed-in connections per account; 50 recipients per message and 50 messages per connection; 4 messages being received or sent at once (1 per account). Sending is limited per hour to 100 messages per account, 50 per app password and 500 recipients per account. Three failed sign-ins close the connection; 10 from one address in 15 minutes block that address for the rest of the window, and repeated failures for one username slow its attempts down. A connection must finish its TLS handshake within 10 seconds and sign in within 60, and is closed after 5 minutes idle.
+
 ## Cloudflare zone management (optional)
 
 If `CF_TOKEN` can also edit DNS and Email Routing on your zones, adding a domain configures Email Routing and the sending subdomain automatically, as on Workers. Without it, domains are recorded as manually managed and the DNS page shows what to set by hand.
@@ -82,6 +110,9 @@ If `CF_TOKEN` can also edit DNS and Email Routing on your zones, adding a domain
 | `IMAP_PORT` | `0` (off) | IMAP over implicit TLS (read, read/flagged marks, delete to Trash); `993` to enable |
 | `IMAP_HOST` | `0.0.0.0` | Address the IMAP listener binds |
 | `IMAP_TLS_CERT`, `IMAP_TLS_KEY` | unset | PEM certificate chain and key for IMAP; required when `IMAP_PORT` is set |
+| `SMTP_SUBMISSION_PORT` | unset (off) | Authenticated SMTP submission for mail clients, implicit TLS only; `465` to enable |
+| `SMTP_SUBMISSION_HOST` | `127.0.0.1` | Address the submission listener binds; `0.0.0.0` in a container |
+| `SMTP_SUBMISSION_TLS_CERT`, `SMTP_SUBMISSION_TLS_KEY` | `IMAP_TLS_CERT`, `IMAP_TLS_KEY` | PEM certificate chain and key for submission; set both or neither |
 | `CF_ACCOUNT_ID`, `CF_TOKEN` | unset | Cloudflare Email Sending, and zone management if the token allows |
 | `INBOUND_WEBHOOK_SECRET` | unset | Enables `/api/inbound` for the relay Worker |
 | `TURNSTILE_SECRET_KEY` | unset | Bot protection on login and reset forms (`NEXT_PUBLIC_TURNSTILE_SITE_KEY` at build time) |
@@ -114,12 +145,13 @@ npm run build:node
 MAILFLARE_RUNTIME=node NODE_ENV=production DATA_DIR=./data node dist/server.mjs
 ```
 
-`MAILFLARE_RUNTIME` keeps its upstream name for compatibility. Ports 25 and 993 need root or a capability; rather than running Node as root, use `SMTP_INBOUND_PORT=2525` and `IMAP_PORT=9993` behind a port forward (or give the service `CAP_NET_BIND_SERVICE`, for example with systemd's `AmbientCapabilities`).
+`MAILFLARE_RUNTIME` keeps its upstream name for compatibility. Ports 25, 465 and 993 need root or a capability; rather than running Node as root, use `SMTP_INBOUND_PORT=2525`, `SMTP_SUBMISSION_PORT=4465` and `IMAP_PORT=9993` behind a port forward (or give the service `CAP_NET_BIND_SERVICE`, for example with systemd's `AmbientCapabilities`).
 
 ## Limitations
 
 - Over IMAP, mail clients can read and search mail, mark it read or flagged, move it between folders (not into Sent or Drafts), delete it to Trash and delete it permanently from Trash (and their own drafts from Drafts), but cannot copy or upload it, create folders or use UID EXPUNGE, and there is no SMTP submission service, so they cannot send.
 - Backups hold the database, not stored message bytes or attachment files. Restoring a backup taken before a message was permanently deleted brings back its record, but not its content or attachments, which were deleted from storage.
 - If removing a permanently deleted message's stored files fails (a storage error, or a crash right after the deletion), the files remain as unused objects; nothing reclaims them automatically yet. Use the web app, a JMAP client or the API for those. IMAP is only available in this Node/Docker build, not on Cloudflare Workers.
-- IMAP rate and connection limits are per instance and in memory.
+- IMAP and SMTP submission rate and connection limits are per instance and in memory.
+- SMTP submission is only available in this Node/Docker build.
 - All state lives on one local volume with SQLite; plan volume backups and host capacity accordingly.
