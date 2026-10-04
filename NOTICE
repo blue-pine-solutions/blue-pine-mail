@@ -15,9 +15,13 @@ other upstream contributors are recorded in the git history.
 
 Modifications
 -------------
-Modifications by Blue Pine Solutions, 2026-09-28.
+Modifications by Blue Pine Solutions, 2026-09-28 through 2026-10-04 (the
+dates of the first and most recent downstream commits at the time of
+writing; this notice is updated as further modifications are made).
 
-Downstream changes in this repository to date:
+Downstream changes in this repository to date, in two groups.
+
+Distribution, licensing and self-hosting changes (2026-09-28 to 2026-09-29):
 
 - Manual (self-hosted) domain setup works without Cloudflare credentials.
 - MX setup for manually managed domains no longer attempts a Cloudflare
@@ -42,9 +46,52 @@ Downstream changes in this repository to date:
   itself.
 - The documentation describes the Blue Pine Solutions Mail distribution;
   upstream sponsorship, pricing and promotional material has been removed.
+- Upstream Mailflare changes were merged into this distribution on
+  2026-09-29, and dependencies were updated. Downstream guard tests and
+  the UPSTREAM.md integration contract record where this distribution
+  follows or diverges from upstream.
+
+Mail protocol and storage changes (2026-09-29 to 2026-10-04), all authored
+by Blue Pine Solutions and not present in upstream Mailflare:
+
+- Mail app passwords: per-mailbox credentials, scoped to IMAP and/or SMTP
+  submission and shown once at creation, with a settings screen and API to
+  manage them. Only a hash is stored. Changing the web password, or
+  removing access to a shared mailbox, revokes the affected credentials.
+- Canonical message storage: a canonical stored representation of each
+  message, with background maintenance, used by the IMAP server and the
+  original-message download.
+- An IMAP server (Node/Docker runtime only, off unless configured, over
+  implicit TLS): mailbox listing and selection, persistent UID and flag
+  state, FETCH, SEARCH, read-write flags, IDLE, UIDPLUS, MOVE, COPY, draft
+  APPEND, recoverable deletion and permanent expunge, mailbox
+  create/rename/delete and stored subscriptions, with connection and
+  resource limits. Related folder-management changes were made to the web
+  application's mailbox folder handling.
+- Authenticated SMTP submission (Node/Docker runtime only, off unless
+  configured, over implicit TLS): AUTH PLAIN/LOGIN with SMTP-scoped mail
+  app passwords, sender authorization against the authenticated mailbox,
+  reconstruction of submitted MIME messages for sending, and rate,
+  concurrency and size limits.
+- Send-path changes: typed delivery results that distinguish rejection,
+  temporary failure and unknown outcome, error text that omits bound
+  parameters, Reply-To support, and a server-owned copy of each submitted
+  message in the Sent folder, so clients should not store their own.
+- Inbound SMTP hardening: a concurrent-connection limit and bounded
+  buffering of oversized DATA, which disconnects peers that keep sending
+  well past the size limit.
+- Five additive database migrations (bp0001 to bp0005, with their schema
+  in src/db/schema/bluepine.ts) that add the app-password, IMAP mailbox
+  state and IMAP subscription tables and triggers. They run after, and
+  leave unchanged, upstream's migrations.
+- The Docker image and Node server start and configure the IMAP and
+  submission listeners (additional exposed ports 465 and 993), and the
+  embedded SQLite adapter's batch transactions were made atomic.
+- Added documentation, tests, verification scripts and certification
+  reports for the above, including checks with a real mail client.
 
 The git history of https://github.com/blue-pine-solutions/blue-pine-mail
-identifies each change individually.
+identifies each change individually, and preserves upstream's history.
 
 License
 -------
