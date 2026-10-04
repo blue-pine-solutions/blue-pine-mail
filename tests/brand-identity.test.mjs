@@ -54,11 +54,11 @@ function pngSize(path) {
 	return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20), colorType: bytes[25] };
 }
 
-test("the canonical product name is Blue Pine Solutions Mail; version and upstream identity are unchanged", () => {
+test("the canonical product name is Blue Pine Solutions Mail; the version is 0.2.0 and the upstream identity is unchanged", () => {
 	assert.equal(app.DISTRIBUTION.name, NAME);
 	assert.equal(app.DEFAULT_APP_NAME, NAME);
 	assert.equal(app.DISTRIBUTION.vendor, "Blue Pine Solutions");
-	assert.equal(app.DISTRIBUTION.version, "0.1.2");
+	assert.equal(app.DISTRIBUTION.version, "0.2.0");
 	assert.equal(app.DISTRIBUTION.upstream.name, "Mailflare");
 	assert.equal(app.DISTRIBUTION.sourceRepository, "https://github.com/blue-pine-solutions/blue-pine-mail");
 });

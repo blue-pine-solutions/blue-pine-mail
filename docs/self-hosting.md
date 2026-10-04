@@ -25,6 +25,8 @@ Pick one; both can be on at once.
 
 Optional: `SMTP_TLS_KEY` and `SMTP_TLS_CERT` (paths inside the container) enable STARTTLS with your own certificate. Without them STARTTLS is not offered, which is safe but means transport encryption depends on the sender.
 
+This listener only receives mail for your domains from other mail servers. It does not authenticate users and never relays, so it is not a mail client's outgoing server; mail clients use [SMTP submission](#sending-from-mail-clients-smtp-submission) on port 465. It limits concurrent connections and refuses oversized messages (`SMTP_MAX_SIZE`); a peer that keeps sending well past the limit is disconnected instead of being buffered. These limits are per process.
+
 **Cloudflare Email Routing relay.** Keep MX on Cloudflare and deploy the Worker in `deploy/cloudflare-email-relay`. It posts each message to `/api/inbound` on your server, signed with `INBOUND_WEBHOOK_SECRET`, and acts on the reject or forward decision the server returns. Set `SMTP_INBOUND_PORT=0` if you do not want the listener at all.
 
 ## Sending mail
@@ -35,7 +37,7 @@ Optional: `SMTP_TLS_KEY` and `SMTP_TLS_CERT` (paths inside the container) enable
 
 ## Mail clients over IMAP
 
-The container can serve IMAP4rev1 to desktop and phone mail clients. Clients can list folders, open and search mail and download attachments, and mark messages read, unread, flagged or unflagged; opening a message marks it read, as in the web app. These are the same read and starred states the web app shows, in both directions. Users with full access to a mailbox can also delete messages: a message marked deleted and then expunged (or closed) by the client moves to **Trash**, exactly like the web app's Delete, and can be restored from there. They can also move messages between folders (IMAP MOVE, which clients use for drag and drop, "Archive" and "Junk"): into INBOX, Archive, Spam, Trash or a custom folder. Moving a message into **Spam** reports it as spam and moving it from Spam back to **INBOX** marks it as not spam, training the mailbox's spam filter exactly like the web app's buttons; other moves train nothing. **Sent** and **Drafts** cannot receive moved messages, a draft can only be moved to Trash (and only by the user who wrote it), and sent mail cannot be moved to Spam. A sent message moved to Trash cannot be put back into Sent over IMAP, because Trash does not remember where a message came from; restore it from the web app instead. A moved message keeps its read and flagged state and its content, and a pending deletion mark does not follow it. Deleting from **Trash** is permanent: a message marked deleted in Trash and then expunged (or closed) by the client is removed for good, for every user of the mailbox, and cannot be restored except from a database backup (see the limitations below). In **Drafts** the same permanently deletes a draft, but only the user who wrote it can mark it deleted; another user's draft is refused, and a draft edited in the web app after it was marked is not deleted (it becomes a new message the client sees again). The message's database record goes first; its stored bytes and attachment files are removed right after, and if that storage cleanup fails the files are left behind as unused objects (logged as `expunge.cleanup-failed`) while the message stays deleted. Copying, creating folders, uploading (APPEND) and UID EXPUNGE (UIDPLUS) are not supported. Read-only and send-only delegates cannot delete or move. There is no SMTP submission service yet, so a client cannot send mail; use the web app for that, and set clients up with IMAP only.
+The container can serve IMAP4rev1 to desktop mail clients. Clients can list folders, open and search mail and download attachments, and mark messages read, unread, flagged or unflagged; opening a message marks it read, as in the web app. These are the same read and starred states the web app shows, in both directions. Users with full access to a mailbox can also delete messages: a message marked deleted and then expunged (or closed) by the client moves to **Trash**, exactly like the web app's Delete, and can be restored from there. They can also move messages between folders (IMAP MOVE, which clients use for drag and drop, "Archive" and "Junk"): into INBOX, Archive, Spam, Trash or a custom folder. Moving a message into **Spam** reports it as spam and moving it from Spam back to **INBOX** marks it as not spam, training the mailbox's spam filter exactly like the web app's buttons; other moves train nothing. **Sent** and **Drafts** cannot receive moved messages, a draft can only be moved to Trash (and only by the user who wrote it), and sent mail cannot be moved to Spam. A sent message moved to Trash cannot be put back into Sent over IMAP, because Trash does not remember where a message came from; restore it from the web app instead. A moved message keeps its read and flagged state and its content, and a pending deletion mark does not follow it. Deleting from **Trash** is permanent: a message marked deleted in Trash and then expunged (or closed) by the client is removed for good, for every user of the mailbox, and cannot be restored except from a database backup (see the limitations below). In **Drafts** the same permanently deletes a draft, but only the user who wrote it can mark it deleted; another user's draft is refused, and a draft edited in the web app after it was marked is not deleted (it becomes a new message the client sees again). The message's database record goes first; its stored bytes and attachment files are removed right after, and if that storage cleanup fails the files are left behind as unused objects (logged as `expunge.cleanup-failed`) while the message stays deleted. Users with full access can also copy messages (COPY and UID COPY; a copy is an independent message, and copies cannot go into Sent or Drafts), create, rename and delete custom folders, subscribe and unsubscribe folders (stored per user and mailbox), and use UID EXPUNGE (UIDPLUS). APPEND is accepted for **Drafts only**, so a client can save and edit drafts; uploading into any other folder is refused. Read-only and send-only delegates cannot delete, move or copy. This is IMAP4rev1 with a deliberately limited extension set (the server advertises `NAMESPACE UNSELECT SPECIAL-USE MOVE UIDPLUS IDLE`), not a complete implementation: CONDSTORE, QRESYNC, MULTIAPPEND, LITERAL+ and hierarchical folders are not supported. Mail clients send through the separate SMTP submission service described below. Only Mozilla Thunderbird 157.0 on Windows, against a local Docker runtime, has been tested; other clients may work but are not certified.
 
 IMAP is off unless you turn it on, and it only speaks **implicit TLS** (IMAPS, port 993). There is no plaintext port 143 and no STARTTLS.
 
@@ -64,7 +66,7 @@ The application keeps running as the unprivileged `node` user; Docker lets conta
 
 ## Sending from mail clients (SMTP submission)
 
-The container can also accept mail from desktop and phone mail clients and send it the same way the web app does: the message lands in the mailbox's **Sent** folder (visible over IMAP and JMAP too) and goes out through the configured sending path (`SMTP_URL` or Cloudflare Email Sending). It is off unless you enable it, and it only speaks SMTP over implicit TLS (port 465); there is no plaintext or STARTTLS submission port.
+The container can also accept mail from desktop mail clients and send it the same way the web app does: the message goes out through the configured sending path (`SMTP_URL` or Cloudflare Email Sending) and the server files the authoritative copy in the mailbox's **Sent** folder (visible over IMAP and JMAP too). This listener is separate from inbound SMTP. It is off unless you enable it, and it only speaks SMTP over implicit TLS (port 465); there is no plaintext port, no STARTTLS and no port 587. Only Mozilla Thunderbird 157.0 on Windows, against a local Docker runtime, has been tested.
 
 ```bash
 SMTP_SUBMISSION_PORT=465
@@ -82,11 +84,13 @@ Publish the port in `docker-compose.yml`:
 
 The certificate rules are the same as for IMAP: unusable files stop startup with a message naming the variables, and `SIGHUP` reloads them. If neither `SMTP_SUBMISSION_TLS_*` variable is set, the IMAP certificate is used. Only TLS 1.2 and later are accepted. If the port cannot be bound, the error is logged and everything else keeps running.
 
-**Signing in.** AUTH PLAIN or LOGIN, with the mailbox address as the username and a mail app password that has the **SMTP** scope for that mailbox (the web password never works). A client can only send as that mailbox's address, and the message's From must match it.
+**Signing in.** AUTH PLAIN or LOGIN, with the mailbox address as the username and a mail app password that has the **SMTP** scope for that mailbox (the web password never works). The full mailbox address is the username (not a bare name), and the account's web password is never accepted. A client can only send as the authenticated mailbox's address, and the message's From must match it.
 
-**In the mail client:** server port 465, connection security "SSL/TLS", authentication "Normal password". Turn off the client's own "Place a copy in Sent" (Thunderbird: Account Settings → Copies & Folders), because the server already files the sent message; leaving it on gives two copies.
+**In the mail client:** server port 465, connection security "SSL/TLS", authentication "Normal password". The server creates the Sent copy of every accepted message, so the client must not upload its own. In Thunderbird, uncheck "Place a copy in" under Account Settings → Copies & Folders for this account (it is a per-account setting, and it was disabled in the certified setup). The server cannot stop a client from creating its own copy; if one does, Sent holds two.
 
-**What is refused.** Messages without a To recipient (Cc- or Bcc-only), signed or encrypted (S/MIME, PGP/MIME) messages, `SMTPUTF8` addresses, and messages over 36 MiB. If the connection to the relay fails in a way where the message may already have gone out (the relay may have accepted it before the connection dropped), the client gets a temporary error saying "Delivery status unknown" and will normally try again later. That retry can produce a duplicate if the first attempt was in fact delivered: the server cannot know, and prefers a possible duplicate to a lost message. A failed attempt leaves nothing in Sent (only accepted messages are filed there), so Sent cannot settle it; only the recipient or the relay's logs can.
+**What is refused.** Messages without a To recipient (Cc- or Bcc-only), signed or encrypted (S/MIME, PGP/MIME) messages, `SMTPUTF8` addresses, and messages over 36 MiB. 
+
+**Delivery outcomes.** When the relay accepts a message, the client is told it succeeded, even if a later local bookkeeping step has a problem. When the relay clearly rejects it, the client gets a permanent or temporary error as appropriate. If the outcome is unknown (for example the connection dropped after the message was handed over), the client gets a temporary `451` error saying "Delivery status unknown": the message **may already have been sent**, and the client will normally try again later. Retrying can then deliver a duplicate, because there is no durable deduplication across attempts or restarts; the server prefers a possible duplicate to a lost message. Nothing is filed in Sent for a failed attempt, so Sent cannot settle it; only the recipient or the relay's logs can.
 
 **Limits.** Per server instance: 100 connections, 10 per client address and 10 signed-in connections per account; 50 recipients per message and 50 messages per connection; 4 messages being received or sent at once (1 per account). Sending is limited per hour to 100 messages per account, 50 per app password and 500 recipients per account. Three failed sign-ins close the connection; 10 from one address in 15 minutes block that address for the rest of the window, and repeated failures for one username slow its attempts down. A connection must finish its TLS handshake within 10 seconds and sign in within 60, and is closed after 5 minutes idle.
 
@@ -107,7 +111,7 @@ If `CF_TOKEN` can also edit DNS and Email Routing on your zones, adding a domain
 | `SMTP_TLS_KEY`, `SMTP_TLS_CERT` | unset | STARTTLS certificate for the listener |
 | `SMTP_URL` | unset | Outbound relay |
 | `SMTP_TLS_REJECT_UNAUTHORIZED` | `true` | Trust self-signed relay certificates when `false` |
-| `IMAP_PORT` | `0` (off) | IMAP over implicit TLS (read, read/flagged marks, delete to Trash); `993` to enable |
+| `IMAP_PORT` | `0` (off) | IMAP over implicit TLS; `993` to enable |
 | `IMAP_HOST` | `0.0.0.0` | Address the IMAP listener binds |
 | `IMAP_TLS_CERT`, `IMAP_TLS_KEY` | unset | PEM certificate chain and key for IMAP; required when `IMAP_PORT` is set |
 | `SMTP_SUBMISSION_PORT` | unset (off) | Authenticated SMTP submission for mail clients, implicit TLS only; `465` to enable |
@@ -125,11 +129,21 @@ If `CF_TOKEN` can also edit DNS and Email Routing on your zones, adding a domain
 
 ## Operations
 
-- **Updates.** Admin → **Version and updates** reports when an approved Blue Pine Solutions Mail release (a GitHub Release tagged `bluepine-vMAJOR.MINOR.PATCH`) is newer than the installed version. It never installs anything. To update, check out the release tag, rebuild the image with the build argument above, and recreate the container; migrations run at start. Back up the volume first.
+- **Updates.** Admin → **Version and updates** reports when an approved Blue Pine Solutions Mail release (a GitHub Release tagged `bluepine-vMAJOR.MINOR.PATCH`) is newer than the installed version. It never installs anything. To update, check out the release tag, rebuild the image with the build argument above, and recreate the container; migrations run at start. Back up the volume first. See [Upgrading from 0.1.2 to 0.2.0](#upgrading-from-012-to-020).
 - **Backups.** The daily 02:00 UTC backup and the admin Backups page export database records to `/data/blobs/backups`, on the same volume as the data. They are not an off-host copy: back up the whole volume to another machine for disaster recovery.
 - **Logs.** `docker compose logs -f mailflare`.
 - **Queues.** Jobs are held in memory. Inbound mail is written to the volume before it is queued, so a restart never loses a message; at worst one stays unparsed until it is re-imported.
 - **Several installations on one host.** Only one container can bind public port 25. To run more, put an inbound mail front end in front of them, or use the Cloudflare relay Worker for each.
+
+## Upgrading from 0.1.2 to 0.2.0
+
+Version 0.2.0 adds five Blue Pine migrations, `bp0001` to `bp0005`. They add the tables and triggers for mail app passwords, IMAP mailbox state and IMAP subscriptions, are additive to the existing schema, and run after upstream's migrations. The existing migration runner applies them at start, in a transaction per migration, and records each by name, so already-applied migrations are skipped.
+
+1. Back up the whole volume (`/data`: the database, raw messages, attachments) to another machine first. The built-in backups on the same volume do not count.
+2. Check out the release tag, rebuild the image with the build argument above and recreate the container.
+3. Check the startup log for the applied migrations. IMAP and SMTP submission stay off until you set the variables described above.
+
+There is no downgrade procedure: once the migrations have run, return to 0.1.2 only by restoring the pre-upgrade backup. Review the limitations below, and the [0.2.0 release notes](release-notes/0.2.0.md), before exposing the mail-client ports.
 
 ## Email assistant and MCP
 
@@ -149,9 +163,12 @@ MAILFLARE_RUNTIME=node NODE_ENV=production DATA_DIR=./data node dist/server.mjs
 
 ## Limitations
 
-- Over IMAP, mail clients can read and search mail, mark it read or flagged, move it between folders (not into Sent or Drafts), delete it to Trash and delete it permanently from Trash (and their own drafts from Drafts), but cannot copy or upload it, create folders or use UID EXPUNGE, and there is no SMTP submission service, so they cannot send.
-- Backups hold the database, not stored message bytes or attachment files. Restoring a backup taken before a message was permanently deleted brings back its record, but not its content or attachments, which were deleted from storage.
-- If removing a permanently deleted message's stored files fails (a storage error, or a crash right after the deletion), the files remain as unused objects; nothing reclaims them automatically yet. Use the web app, a JMAP client or the API for those. IMAP is only available in this Node/Docker build, not on Cloudflare Workers.
-- IMAP and SMTP submission rate and connection limits are per instance and in memory.
-- SMTP submission is only available in this Node/Docker build.
-- All state lives on one local volume with SQLite; plan volume backups and host capacity accordingly.
+- **Not production-ready.** Blue Pine Solutions Mail 0.2.0 is not presented as production-ready, and managed-service operational hardening is not complete. You provision and renew TLS certificates, monitor the host and plan capacity.
+- **Clients.** Only Mozilla Thunderbird 157.0 on Windows has been tested, against a local Docker runtime on loopback. Outlook, Apple Mail, phone clients and other software are untested.
+- **IMAP** is a limited IMAP4rev1 command set: APPEND only into Drafts, COPY and MOVE not into Sent or Drafts, no CONDSTORE or QRESYNC, flat folder namespace. A message deleted permanently from Trash or Drafts can be restored only from a database backup.
+- **SMTP submission** is implicit TLS on port 465 only (no port 587 or STARTTLS), and does not support `SMTPUTF8` addresses, signed or encrypted messages, or Bcc-only messages.
+- **Possible duplicates.** If delivery status is unknown the client gets a temporary error, and a retry can send the message twice; there is no durable deduplication.
+- **Sent copies.** The server files the Sent copy; a client that also uploads its own creates a duplicate.
+- **Process-local limits.** IMAP and SMTP connection, sign-in and rate limits are per instance, held in memory and reset on restart.
+- **Node/Docker only.** IMAP and SMTP submission are not available on Cloudflare Workers.
+- **Storage.** All state lives on one local volume with SQLite; plan off-host volume backups and host capacity. Backups hold database records, not stored message bytes or attachment files. If removing a permanently deleted message's stored files fails, the files remain as unused objects and nothing reclaims them automatically yet.

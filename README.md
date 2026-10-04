@@ -9,6 +9,7 @@ It is an independent downstream distribution of [Mailflare](https://github.com/h
 - **Domains**: connect domains. On Cloudflare, Email Routing and sending DNS are configured for you; without Cloudflare credentials the DNS page lists the records to create by hand.
 - **Mailboxes and accounts**: create personal and shared mailboxes, add user accounts, and delegate mailbox access.
 - **Email**: send and receive email with attachments, rich formatting, signatures, automatic replies and account forwarding.
+- **Mail clients** (Node/Docker build only, opt-in): connect a desktop mail client over IMAP to read, organize and draft mail, and over authenticated SMTP submission to send, using per-mailbox **mail app passwords** created in Settings → App passwords. The server stores the Sent copy. Thunderbird 157.0 on Windows is the one tested client; see the limitations below.
 - **Organization**: search, custom folders, stars, snoozing, archive, spam and trash.
 - **Routing rules**: store, forward, reject or categorize incoming messages.
 - **Notifications**: real-time inbox updates and browser notifications.
@@ -22,7 +23,7 @@ Optional features (custom branding, multiple accounts, shared mailboxes, account
 
 Cloudflare Workers is the primary deployment target: mail data stays in your own D1 database, attachments in your own R2 bucket, and Cloudflare Email Routing delivers incoming mail to the Worker. See the [deployment guide](docs/deployment.md).
 
-A Node/Docker build is also supported for self-hosting on your own server, with SQLite and local files instead of D1 and R2 and a built-in SMTP listener for inbound mail. See [self-hosting](docs/self-hosting.md).
+A Node/Docker build is also supported for self-hosting on your own server, with SQLite and local files instead of D1 and R2, a built-in SMTP listener for inbound mail, and optional IMAP and SMTP submission listeners for mail clients. See [self-hosting](docs/self-hosting.md).
 
 Cloudflare charges depend on your plan and usage; check Cloudflare's current pricing for Workers, D1, R2, Queues and Email Sending before deploying.
 
@@ -34,9 +35,18 @@ Cloudflare charges depend on your plan and usage; check Cloudflare's current pri
 
 ## Current limitations
 
-- Desktop and phone mail clients can connect over IMAP only to the Node/Docker build. Over IMAP they can read mail, mark it read, unread or flagged, move it between folders, delete it to Trash, and delete it permanently from Trash (and from Drafts, their own drafts only), but not copy or upload it or create folders (see [self-hosting](docs/self-hosting.md#mail-clients-over-imap)). There is no SMTP submission service, and the Cloudflare Workers deployment has no IMAP. Use the web app, JMAP clients or the API to send and to organize mail.
+- Mail clients (IMAP and SMTP submission) work only with the Node/Docker build, not the Cloudflare Workers deployment. Both are off unless enabled, speak implicit TLS only (IMAPS on 993, SMTP submission on 465; no plaintext, STARTTLS or port 587), and need a TLS certificate that you provision and renew. See [self-hosting](docs/self-hosting.md#mail-clients-over-imap).
+- Mozilla Thunderbird 157.0 on Windows, against a local Docker runtime, is the only mail client tested for IMAP and SMTP submission. Other clients (Outlook, Apple Mail, phone clients and so on) may work but are untested and not certified.
+- IMAP is IMAP4rev1 with a deliberately limited command set, not a complete implementation: APPEND is accepted only for Drafts, COPY and MOVE cannot target Sent or Drafts, and extensions such as CONDSTORE and QRESYNC are not offered.
+- SMTP submission does not support `SMTPUTF8` addresses, signed or encrypted (S/MIME, PGP/MIME) messages, or Bcc-only messages. The server stores the Sent copy of each accepted message, so turn off the client's own "Place a copy in Sent" for the account. If delivery status is unknown, the client gets a temporary error and a retry can send a duplicate; there is no durable deduplication.
+- IMAP and SMTP connection and rate limits are held in memory by each process and reset on restart.
+- Blue Pine Solutions Mail is not presented as production-ready, and managed-service operational hardening is not complete. Certificates, monitoring, off-host backups and capacity are the operator's responsibility.
 - The Docker build keeps its database and files on one local volume. The built-in backups are record exports stored on that same volume, so they are not an off-host disaster-recovery copy.
 - One host can bind public port 25 only once. Running several Docker installations on one server needs an inbound mail front end (or the Cloudflare relay Worker) to route mail to each.
+
+## Upgrading from 0.1.2
+
+Version 0.2.0 adds five additive database migrations (`bp0001` to `bp0005`) for mail app passwords and IMAP state. They run automatically at start, are tracked by name and leave existing tables unchanged. Back up the persistent volume or database before upgrading. Downgrading after the migrations have run is not supported; to return to 0.1.2, restore the backup. See [self-hosting](docs/self-hosting.md#upgrading-from-012-to-020) and the [0.2.0 release notes](docs/release-notes/0.2.0.md).
 
 ## Local development
 
