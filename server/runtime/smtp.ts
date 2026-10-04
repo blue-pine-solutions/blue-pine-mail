@@ -1,10 +1,71 @@
 import { readFileSync } from "node:fs";
+import type { Socket } from "node:net";
 import { SMTPServer } from "smtp-server";
 import type { SMTPServerSession } from "smtp-server";
 import { DISTRIBUTION } from "@/lib/distribution/identity";
 import { intakeIncomingMail } from "@/lib/email/intake";
 import { inboundAttachmentLimitReasonFromRaw } from "@/lib/email/inbound-attachments";
 import type { Mailer } from "./mailer";
+
+/**
+ * Simultaneous inbound connections. Each in-flight message can hold up to SMTP_MAX_SIZE
+ * (36 MiB by default), so this bounds worst-case DATA memory (about 0.9 GiB) in a process that
+ * also serves the app, IMAP and submission, while leaving ample room for a self-hosted domain.
+ */
+export const INBOUND_SMTP_MAX_CLIENTS = 25;
+
+/** Bytes read past the size limit (to answer 552 in protocol) before the connection is dropped. */
+export const INBOUND_DISCARD_ALLOWANCE_BYTES = 1024 * 1024;
+
+/**
+ * Collects DATA chunks up to `limit` bytes. The first chunk that would take the message past the
+ * limit discards everything held and nothing is kept afterwards, so retained memory never exceeds
+ * `limit` however much more the peer sends. A message of exactly `limit` bytes is kept whole.
+ */
+export class BoundedDataBuffer {
+	private chunks: Buffer[] = [];
+	private kept = 0;
+	private seen = 0;
+	private over = false;
+
+	constructor(private readonly limit: number) {}
+
+	push(chunk: Buffer) {
+		this.seen += chunk.length;
+		if (this.over) return;
+		if (this.kept + chunk.length > this.limit) {
+			this.over = true;
+			this.chunks = [];
+			this.kept = 0;
+			return;
+		}
+		this.chunks.push(chunk);
+		this.kept += chunk.length;
+	}
+
+	get oversized() {
+		return this.over;
+	}
+
+	/** Bytes the peer has sent so far, kept or not. */
+	get received() {
+		return this.seen;
+	}
+
+	/** Bytes currently retained. */
+	get retained() {
+		return this.kept;
+	}
+
+	/** The message, or null when it was oversized. */
+	take(): Buffer | null {
+		if (this.over) return null;
+		const message = Buffer.concat(this.chunks, this.kept);
+		this.chunks = [];
+		this.kept = 0;
+		return message;
+	}
+}
 
 /**
  * Receive mail directly on port 25 (or wherever SMTP_INBOUND_PORT points).
@@ -19,23 +80,37 @@ export function startSmtpListener(
 ) {
 	// STARTTLS is only offered with a real certificate; smtp-server's built-in
 	// one has a public private key, and advertising it would mislead senders.
+	// smtp-server does not expose the socket on the session; track them to drop a peer that floods DATA.
+	const sockets = new Map<string, Socket>();
+	const socketKey = (address: string | undefined, port: number | undefined) => `${(address ?? "").replace(/^::ffff:/, "")}|${port}`;
 	const server = new SMTPServer({
 		name: options.hostname,
 		authOptional: true,
 		disabledCommands: options.tls ? ["AUTH"] : ["AUTH", "STARTTLS"],
 		...(options.tls ? { key: readFileSync(options.tls.keyPath), cert: readFileSync(options.tls.certPath) } : {}),
 		size: options.maxSize,
+		maxClients: INBOUND_SMTP_MAX_CLIENTS,
 		banner: DISTRIBUTION.name,
 		onData(stream, session: SMTPServerSession, callback) {
-			const chunks: Buffer[] = [];
-			stream.on("data", (chunk: Buffer) => chunks.push(chunk));
+			// smtp-server keeps emitting data after sizeExceeded, so the bound is enforced here: nothing is
+			// retained once the limit is crossed, and a peer that sends far past it is disconnected.
+			const data = new BoundedDataBuffer(options.maxSize);
+			let aborted = false;
+			stream.on("data", (chunk: Buffer) => {
+				if (aborted) return;
+				data.push(chunk);
+				if (data.received - options.maxSize > INBOUND_DISCARD_ALLOWANCE_BYTES) {
+					aborted = true;
+					sockets.get(socketKey(session.remoteAddress, session.remotePort))?.destroy();
+				}
+			});
 			stream.on("end", async () => {
-				if (stream.sizeExceeded) {
-					const error = Object.assign(new Error("Message exceeds size limit"), { responseCode: 552 });
-					callback(error);
+				if (aborted) return;
+				const raw = stream.sizeExceeded ? null : data.take();
+				if (!raw) {
+					callback(Object.assign(new Error("Message exceeds size limit"), { responseCode: 552 }));
 					return;
 				}
-				const raw = Buffer.concat(chunks);
 				let attachmentLimitReason: string | null;
 				try {
 					attachmentLimitReason = await inboundAttachmentLimitReasonFromRaw(toArrayBuffer(raw));
@@ -78,6 +153,13 @@ export function startSmtpListener(
 				callback();
 			});
 		},
+	});
+	server.server.on("connection", (socket: Socket) => {
+		const key = socketKey(socket.remoteAddress, socket.remotePort);
+		sockets.set(key, socket);
+		socket.once("close", () => {
+			if (sockets.get(key) === socket) sockets.delete(key);
+		});
 	});
 	server.on("error", (error) => console.error("SMTP listener error", error));
 	server.listen(options.port, options.host ?? "0.0.0.0", () => {
